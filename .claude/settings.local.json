@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx prisma:*)",
+      "Bash(xxd \"c:/_UsrData/PalmCode/astos-js/astos-be/src/auth/auth.service.ts\")",
+      "Bash(npx tsc:*)"
+    ]
+  }
+}
