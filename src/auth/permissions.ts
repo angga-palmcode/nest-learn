@@ -16,4 +16,14 @@ export const PERMISSIONS = {
 
   // ─── Audit ────────────────────────────────────────────────────────────────
   AUDIT_VIEW:         ['admin'] as const,
+
+  // ─── Compliance ───────────────────────────────────────────────────────────
+  COMPLIANCE_CONSENT_WRITE:     ['admin', 'manager'] as const,
+  COMPLIANCE_DNC_READ:          ['admin', 'manager', 'agent'] as const,
+  COMPLIANCE_DNC_WRITE:         ['admin', 'manager'] as const,
+  COMPLIANCE_DNC_SYNC:          ['admin'] as const,
+  COMPLIANCE_DISCLOSURES_READ:  ['admin', 'manager'] as const,
+  COMPLIANCE_DISCLOSURES_WRITE: ['admin', 'manager'] as const,
+  COMPLIANCE_AUDIT_READ:        ['admin'] as const,
+  COMPLIANCE_AUDIT_EXPORT:      ['admin'] as const,
 } as const;

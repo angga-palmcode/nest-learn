@@ -20,9 +20,13 @@ model Organization {
   updated_at           DateTime @updatedAt
   deleted_at           DateTime?
 
-  users       User[]
-  invitations UserInvitation[]
-  auditLogs   AuditLog[]
+  users                User[]
+  invitations          UserInvitation[]
+  auditLogs            AuditLog[]
+  consentRecords       ConsentRecord[]
+  dncEntries           DncRegistry[]
+  complianceChecks     ComplianceCheck[]
+  recordingDisclosures RecordingDisclosure[]
 }
 
 enum UserRole {
@@ -129,4 +133,92 @@ model AuditLog {
   metadata      Json?
   ip_address    String?  @db.VarChar(45)
   created_at    DateTime @default(now())
+}
+
+// ─── Compliance Engine ────────────────────────────────────────────────────────
+
+enum ConsentType {
+  prior_express
+  prior_express_written
+  implied
+}
+
+enum DncSource {
+  national_registry
+  internal_optout
+  manual
+}
+
+enum ComplianceCheckType {
+  consent
+  dnc
+  calling_window
+  recording_disclosure
+  optout_detection
+}
+
+enum ComplianceCheckStatus {
+  passed
+  failed
+  skipped
+}
+
+model ConsentRecord {
+  id             String      @id @default(uuid())
+  org_id         String
+  org            Organization @relation(fields: [org_id], references: [id])
+  lead_id        String      @db.VarChar(255)
+  consent_type   ConsentType
+  consent_source String      @db.VarChar(255)
+  consent_text   String?     @db.Text
+  consented_at   DateTime
+  expires_at     DateTime?
+  revoked_at     DateTime?
+  revoked_reason String?     @db.VarChar(255)
+  metadata       Json?
+  created_at     DateTime    @default(now())
+  updated_at     DateTime    @updatedAt
+}
+
+model DncRegistry {
+  id           String        @id @default(uuid())
+  phone_number String        @db.VarChar(20)
+  source       DncSource
+  reason       String?       @db.VarChar(255)
+  added_at     DateTime
+  lead_id      String?       @db.VarChar(255)
+  org_id       String?
+  org          Organization? @relation(fields: [org_id], references: [id])
+  call_id      String?       @db.VarChar(255)
+  created_at   DateTime      @default(now())
+
+  @@index([phone_number, org_id])
+}
+
+model ComplianceCheck {
+  id         String                @id @default(uuid())
+  org_id     String
+  org        Organization          @relation(fields: [org_id], references: [id])
+  call_id    String?               @db.VarChar(255)
+  lead_id    String                @db.VarChar(255)
+  check_type ComplianceCheckType
+  status     ComplianceCheckStatus
+  details    Json
+  checked_at DateTime
+  created_at DateTime              @default(now())
+}
+
+model RecordingDisclosure {
+  id           String       @id @default(uuid())
+  org_id       String
+  org          Organization @relation(fields: [org_id], references: [id])
+  name         String       @db.VarChar(255)
+  language     String       @db.VarChar(10)
+  text         String       @db.Text
+  audio_url    String       @db.VarChar(500)
+  duration_ms  Int
+  jurisdiction String       @db.VarChar(50)
+  is_default   Boolean      @default(false)
+  created_at   DateTime     @default(now())
+  updated_at   DateTime     @updatedAt
 }

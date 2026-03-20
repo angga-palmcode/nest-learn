@@ -664,3 +664,139 @@ Authentication is the first system a user interacts with. It controls access to 
 **DELETE `/api/users/{id}/force-logout`** — Force logout a user.
 **Authentication:** Required. Role: `admin`.
 **Flow:** Revoke all tokens + delete all sessions for the target user.
+
+---
+
+### 1.4 RBAC Permission Matrix
+
+Every API endpoint must check the user's role. The following matrix defines access:
+
+| Endpoint / Action | Admin | Manager | Agent |
+|---|---|---|---|
+| Register org | Yes (creates org) | N/A | N/A |
+| Login / Logout / Profile | Yes | Yes | Yes |
+| MFA setup/disable | Yes | Yes | Yes |
+| View own sessions | Yes | Yes | Yes |
+| List users | Yes | Read-only | No |
+| Invite users | Yes | No | No |
+| Change user roles | Yes | No | No |
+| Deactivate/activate users | Yes | No | No |
+| Force logout users | Yes | No | No |
+| Org settings (timezone, MFA enforcement) | Yes | No | No |
+| Create campaigns | Yes | Yes | No |
+| Edit campaigns | Yes | Yes (own) | No |
+| Pause/resume campaigns | Yes | Yes (own) | No |
+| View campaigns | Yes | Yes | Yes (assigned only) |
+| Upload leads | Yes | Yes | No |
+| View analytics | Yes | Yes | Yes (assigned campaigns) |
+| View audit trail | Yes | No | No |
+| Export data | Yes | Yes | No |
+| Compliance reports | Yes | Read-only | No |
+
+**Implementation:** Create a Laravel middleware `CheckRole` and use Laravel Policies for resource-level authorization.
+
+```php
+// Example middleware usage in routes
+Route::middleware(['auth:sanctum', 'role:admin'])->group(function () {
+    Route::post('/users/invite', [UserController::class, 'invite']);
+});
+
+// Example policy
+public function update(User $authUser, Campaign $campaign): bool
+{
+    if ($authUser->role === 'admin') return true;
+    if ($authUser->role === 'manager' && $campaign->org_id === $authUser->org_id) return true;
+    return false;
+}
+```
+
+### 1.5 Frontend Pages & Behavior
+
+#### Login Page (`/auth/login`)
+
+**Layout:** Centered card on a minimal background with Astos branding.
+
+**Fields:**
+- Email input (type="email", autofocus)
+- Password input (type="password", show/hide toggle)
+- "Remember me" checkbox (extends token expiry to 30 days)
+- "Forgot password?" link
+- Submit button: "Sign In"
+- Link: "Don't have an account? Get Started"
+
+**Behavior:**
+1. Client-side validation on blur (email format, password not empty).
+2. On submit → show loading spinner on button → call POST `/api/auth/login`.
+3. If success with no MFA → store token, redirect to `/dashboard`.
+4. If success with MFA → redirect to `/auth/mfa-verify` with `mfa_token` in state.
+5. If 401 → show "Invalid email or password" error below form.
+6. If 403 (deactivated) → show error message with contact admin guidance.
+7. If 403 (unverified) → show message with "Resend verification email" button.
+8. If 429 (locked) → show lockout message with countdown timer.
+
+#### MFA Verification Page (`/auth/mfa-verify`)
+
+**Fields:**
+- 6-digit code input (numeric, auto-advance between digits)
+- Method toggle: "Use authenticator app" / "Send code via email"
+- "Use recovery code" link
+- Submit button: "Verify"
+- "Back to login" link
+
+**Behavior:**
+1. If method is `email` and page loads → auto-send email OTP via POST `/api/auth/mfa/send-email`.
+2. On submit → call POST `/api/auth/mfa/verify`.
+3. If success → store token, redirect to `/dashboard`.
+4. If fail → shake input, show error, clear code fields.
+5. If mfa_token expires (5 min) → redirect to `/auth/login` with message.
+
+#### Registration Page (`/auth/register`)
+
+**Fields:**
+- Full name
+- Work email
+- Password (with strength meter: weak/fair/strong/excellent)
+- Confirm password
+- Organization name
+- Industry (dropdown)
+- Language preference (toggle: Swedish / English)
+- Terms & privacy policy checkbox
+- Submit button: "Create Account"
+
+**Behavior:**
+1. Real-time password strength indicator.
+2. On submit → call POST `/api/auth/register`.
+3. On success → redirect to `/auth/verify-email` with success message.
+4. On 422 → show field-level errors.
+
+#### Password Reset Flow
+
+**Page 1 (`/auth/forgot-password`):** Email input + submit. Always shows success message.
+**Page 2 (`/auth/reset-password?token=...&email=...`):** New password + confirm + submit. On success → redirect to login.
+
+#### Accept Invitation Page (`/auth/accept-invite?token=...`)
+
+**Fields:** Name (pre-filled if provided), password, confirm password.
+**Flow:** Call POST `/api/auth/accept-invite` → on success → redirect to login.
+
+### 1.6 Acceptance Criteria
+
+| ID | Criterion | How to Verify |
+|---|---|---|
+| AC-AUTH-01 | User can register, receive verification email, verify, and log in | E2E test: register → check email → click verify → login succeeds |
+| AC-AUTH-02 | Unverified users cannot access protected routes | Login attempt with unverified email returns 403 |
+| AC-AUTH-03 | Login fails after 5 bad attempts within 15 minutes | Automated test: 5 wrong passwords → 6th returns 429 |
+| AC-AUTH-04 | Lockout notification email is sent on account lockout | Check email service logs after lockout trigger |
+| AC-AUTH-05 | MFA (TOTP) works end-to-end | Setup MFA → logout → login → verify TOTP code → access granted |
+| AC-AUTH-06 | MFA (email OTP) works end-to-end | Same flow with email method |
+| AC-AUTH-07 | Recovery codes work when MFA device is lost | Use recovery code instead of TOTP → access granted, code marked used |
+| AC-AUTH-08 | Password reset flow works end-to-end | Request reset → click email link → set new password → login with new password |
+| AC-AUTH-09 | Old sessions are invalidated on password reset | Login on 2 devices → reset password → both sessions are revoked |
+| AC-AUTH-10 | Admin can invite user, invitee can accept and log in | Invite → email received → accept → set password → login succeeds |
+| AC-AUTH-11 | Admin can deactivate user, user cannot log in | Deactivate → user's existing session ends → login returns 403 |
+| AC-AUTH-12 | RBAC prevents agent from accessing admin endpoints | Agent token → call admin-only endpoint → 403 |
+| AC-AUTH-13 | Sessions expire after 24h of inactivity | Create session → wait 24h (mock) → next request returns 401 |
+| AC-AUTH-14 | Admin can force-logout any user in org | Force logout → target user's next request returns 401 |
+| AC-AUTH-15 | Org-enforced MFA requires MFA for all users | Enable org MFA → user without MFA setup is prompted to set it up on next login |
+
+---
