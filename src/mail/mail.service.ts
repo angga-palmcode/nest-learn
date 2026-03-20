@@ -35,4 +35,8 @@ export class MailService {
   sendAccountLockedEmail(email: string, lockedUntil: Date): void {
     this.logger.log(`[MAIL] Account locked notification → ${email} until ${lockedUntil.toISOString()}`);
   }
+
+  sendMfaEmailOtp(email: string, code: string): void {
+    this.logger.log(`[MAIL] MFA email OTP → ${email} | Code: ${code}`);
+  }
 }

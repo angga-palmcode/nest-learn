@@ -54,10 +54,14 @@ model User {
   updated_at         DateTime       @updatedAt
   deleted_at         DateTime?
 
-  refreshTokens RefreshToken[]
-  sessions      UserSession[]
+  failed_login_attempts Int       @default(0)
+  locked_until          DateTime?
+
+  refreshTokens   RefreshToken[]
+  sessions        UserSession[]
   sentInvitations UserInvitation[]
-  auditLogs     AuditLog[]
+  auditLogs       AuditLog[]
+  mfaEmailTokens  MfaEmailToken[]
 }
 
 model RefreshToken {
@@ -94,6 +98,15 @@ model UserInvitation {
   accepted_at DateTime?
   expires_at  DateTime
   created_at  DateTime @default(now())
+}
+
+model MfaEmailToken {
+  id         String   @id @default(uuid())
+  user_id    String
+  user       User     @relation(fields: [user_id], references: [id])
+  code_hash  String
+  expires_at DateTime
+  created_at DateTime @default(now())
 }
 
 model PasswordResetToken {

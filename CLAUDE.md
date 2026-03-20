@@ -5,7 +5,7 @@
 - **Framework:** NestJS 11 + TypeScript
 - **Database:** PostgreSQL (local: `nest-dev2` on `localhost:5432`)
 - **ORM:** Prisma 5
-- **Auth:** JWT (access 15 min) + opaque refresh tokens (7 days) + TOTP MFA
+- **Auth:** JWT (access 15 min) + opaque refresh tokens (7 days) + TOTP MFA + Email OTP MFA
 - **Runtime:** Node.js 22
 
 ---
@@ -81,6 +81,9 @@ src/
 │   │   ├── mfa-verify.dto.ts
 │   │   ├── mfa-challenge.dto.ts
 │   │   ├── mfa-recover.dto.ts
+│   │   ├── send-mfa-email.dto.ts
+│   │   ├── mfa-email-challenge.dto.ts
+│   │   ├── accept-invite.dto.ts
 │   │   └── revoke-all-sessions.dto.ts
 │   ├── guards/
 │   │   ├── jwt-auth.guard.ts   Protect routes with Bearer JWT
@@ -155,9 +158,20 @@ prisma/
 | mfa_recovery_codes | JSON NULLABLE | array of bcrypt-hashed codes |
 | last_login_at / last_login_ip | TIMESTAMP / VARCHAR | updated on each login |
 | is_active | BOOLEAN | default true; inactive = cannot login |
+| failed_login_attempts | INT | default 0; reset on successful login |
+| locked_until | TIMESTAMP NULLABLE | set for 15 min after 5 failed attempts |
 | invited_by | UUID FK → User NULLABLE | self-referential |
 | invited_at | TIMESTAMP NULLABLE | |
 | created_at / updated_at / deleted_at | TIMESTAMP | soft delete |
+
+### `MfaEmailToken`
+| Column | Type | Notes |
+|---|---|---|
+| id | UUID PK | auto |
+| user_id | UUID FK → User | |
+| code_hash | STRING | SHA-256 of the 6-digit OTP |
+| expires_at | TIMESTAMP | 5 min from creation |
+| created_at | TIMESTAMP | |
 
 ### `RefreshToken`
 | Column | Type | Notes |
@@ -225,7 +239,7 @@ prisma/
 | Method | Path | Guard | Body | Description |
 |--------|------|-------|------|-------------|
 | POST | `/auth/register` | none | `{ name, email, password, password_confirmation, organization_name, industry?, locale? }` | Creates org + admin user, sends verification email |
-| POST | `/auth/login` | none | `{ email, password, device_name? }` | Returns token pair, or `mfa_required + mfa_token`. Blocks if email not verified. |
+| POST | `/auth/login` | none | `{ email, password, device_name? }` | Returns token pair + session_id, or `mfa_required + mfa_token + mfa_method`. Blocks if unverified. 429 if locked. |
 | POST | `/auth/refresh` | none | `{ refresh_token }` | Rotate refresh token → new token pair |
 | POST | `/auth/logout` | JWT | `{ refresh_token }` + `X-Session-ID` header | Revoke refresh token + session |
 | POST | `/auth/email/verify/:id/:hash` | none | — | Verify email address from signed link |
@@ -237,8 +251,12 @@ prisma/
 | POST | `/auth/mfa/setup` | JWT | `{ current_password }` | Generate TOTP secret + QR URI + 8 recovery codes |
 | POST | `/auth/mfa/confirm` | JWT | `{ code }` | Confirm TOTP code → enables MFA |
 | DELETE | `/auth/mfa` | JWT | `{ current_password, code }` | Disable MFA |
-| POST | `/auth/mfa/challenge` | none | `{ mfa_token, code }` | Login step 2: TOTP → full tokens |
-| POST | `/auth/mfa/recover` | none | `{ mfa_token, recovery_code }` | Login step 2: recovery code → full tokens |
+| POST | `/auth/mfa/challenge` | none | `{ mfa_token, code }` | Login step 2: TOTP → full tokens + session_id |
+| POST | `/auth/mfa/recover` | none | `{ mfa_token, recovery_code }` | Login step 2: recovery code → full tokens + session_id |
+| POST | `/auth/mfa/send-email` | none | `{ mfa_token }` | Send 6-digit OTP to user's email (email MFA flow) |
+| POST | `/auth/mfa/challenge/email` | none | `{ mfa_token, code }` | Login step 2: email OTP → full tokens + session_id |
+| GET | `/auth/accept-invite/:token` | none | — | Get invitation details (email, org, role) |
+| POST | `/auth/accept-invite` | none | `{ token, name, password, password_confirmation }` | Accept invite → creates account + auto-login tokens |
 | GET | `/auth/sessions` | JWT | — + `X-Session-ID` header | List active sessions |
 | DELETE | `/auth/sessions/:id` | JWT | — | Revoke specific session |
 | DELETE | `/auth/sessions` | JWT | `{ current_password }` + `X-Session-ID` header | Revoke all sessions except current |
@@ -278,21 +296,37 @@ POST /auth/email/verify/:id/:hash
 ### Normal login (email verified, no MFA)
 ```
 POST /auth/login { email, password, device_name? }
-→ { access_token, refresh_token }
+→ { access_token, refresh_token, session_id }
   ↓ UserSession created
 ```
 
 ### Login with MFA
 ```
 POST /auth/login { email, password }
-→ { mfa_required: true, mfa_token }   ← valid 5 minutes
+→ { mfa_required: true, mfa_token, mfa_method: 'totp'|'email' }   ← valid 5 minutes
+  mfa_method = 'totp'  → user has TOTP enabled
+  mfa_method = 'email' → org enforces MFA but user has no TOTP (email OTP fallback)
 
+# TOTP method:
 POST /auth/mfa/challenge { mfa_token, code }
-→ { access_token, refresh_token }
+→ { access_token, refresh_token, session_id }
 
-# OR recovery code:
+# Email OTP method:
+POST /auth/mfa/send-email { mfa_token }   → sends 6-digit code to user's email
+POST /auth/mfa/challenge/email { mfa_token, code }
+→ { access_token, refresh_token, session_id }
+
+# Recovery code (either MFA method):
 POST /auth/mfa/recover { mfa_token, recovery_code }
-→ { access_token, refresh_token }
+→ { access_token, refresh_token, session_id }
+```
+
+### Accept Invitation
+```
+GET  /auth/accept-invite/:token          → { email, role, org: { name, slug } }
+POST /auth/accept-invite { token, name, password, password_confirmation }
+→ { access_token, refresh_token, session_id, user: { id, name, email, role } }
+  ↓ email is auto-verified, user is logged in immediately
 ```
 
 ### Enable MFA
@@ -385,6 +419,10 @@ req.user  // → { userId, orgId, role }
 
 ## Key Quirks & Gotchas
 
+- **Brute-force lockout** — after 5 failed login attempts, `locked_until` is set to 15 min in the future. `validateUser()` throws 429 (`HttpException` with `HttpStatus.TOO_MANY_REQUESTS`) — NestJS 11 does not export `TooManyRequestsException`, use `HttpException` directly.
+- **Email OTP MFA** — stored as a SHA-256 hash (not bcrypt) in `MfaEmailToken`. One active token per user; previous token is deleted before issuing a new one. Single-use: deleted on successful verify.
+- **`mfa_method` in login response** — `'totp'` when user has TOTP enabled, `'email'` when org enforces MFA but user has no TOTP set up. Frontend uses this to decide which challenge screen to show.
+- **Accept invite auto-login** — accepted users have `email_verified_at` set automatically (no email verification step needed). The endpoint returns tokens directly.
 - **otplib v13** has a new functional API — no `authenticator` export. Must pass plugin instances:
   ```typescript
   const otpCrypto = new NobleCryptoPlugin();
@@ -396,6 +434,6 @@ req.user  // → { userId, orgId, role }
 - **Email verification required for login** — `validateUser` returns the user even if unverified; the `login()` method then throws 403 if `email_verified_at` is null.
 - **MFA recovery codes** — stored as bcrypt hashes in `mfa_recovery_codes` JSON array. Each code is consumed (removed) after use.
 - **Refresh token rotation** — old refresh token is revoked before issuing a new pair. Reusing a revoked token returns 401.
-- **`X-Session-ID` header** — returned to the client after login (not yet wired into response body); frontend should store and send it to enable "current session" marking and targeted revocation.
+- **`session_id`** — now returned in the response body of all login endpoints (normal login, TOTP challenge, email OTP challenge, recovery, accept-invite). Frontend should store it and send as `X-Session-ID` header for session listing and targeted revocation.
 - **MailService is console-only** — no SMTP configured yet. All emails are logged via `Logger`. Check the console for verification URLs / reset links during development.
 - **`start:prod` script** points to `dist/main` but compiled output is in `dist/src/main.js`. Use `node dist/src/main.js` directly.

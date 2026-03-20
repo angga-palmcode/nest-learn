@@ -20,10 +20,12 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
+import { AcceptInviteDto } from './dto/accept-invite.dto';
 import { DisableMfaDto } from './dto/disable-mfa.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { LoginDto } from './dto/login.dto';
 import { MfaChallengeDto } from './dto/mfa-challenge.dto';
+import { MfaEmailChallengeDto } from './dto/mfa-email-challenge.dto';
 import { MfaRecoverDto } from './dto/mfa-recover.dto';
 import { MfaVerifyDto } from './dto/mfa-verify.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
@@ -31,6 +33,7 @@ import { RegisterDto } from './dto/register.dto';
 import { ResendVerificationDto } from './dto/resend-verification.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { RevokeAllSessionsDto } from './dto/revoke-all-sessions.dto';
+import { SendMfaEmailDto } from './dto/send-mfa-email.dto';
 import { SetupMfaDto } from './dto/setup-mfa.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
@@ -45,9 +48,10 @@ export class AuthController {
   @UseGuards(AuthGuard('local'))
   @Post('login')
   @ApiOperation({ summary: 'Login with email + password' })
-  @ApiResponse({ status: 201, description: 'Token pair, or mfa_required + mfa_token if MFA is enabled' })
+  @ApiResponse({ status: 201, description: 'Token pair, or mfa_required + mfa_token + mfa_method if MFA is needed' })
   @ApiResponse({ status: 401, description: 'Invalid credentials' })
   @ApiResponse({ status: 403, description: 'Account deactivated or email not verified' })
+  @ApiResponse({ status: 429, description: 'Account locked after too many failed attempts' })
   async login(
     @Body() body: LoginDto,
     @Request() req: any,
@@ -185,8 +189,8 @@ export class AuthController {
   // ─── MFA login challenges ─────────────────────────────────────────────────
 
   @Post('mfa/challenge')
-  @ApiOperation({ summary: 'Login step 2 (MFA): submit TOTP code → full token pair' })
-  @ApiResponse({ status: 201, description: 'Returns access_token + refresh_token' })
+  @ApiOperation({ summary: 'Login step 2 (TOTP): submit authenticator code → full token pair' })
+  @ApiResponse({ status: 201, description: 'Returns access_token + refresh_token + session_id' })
   @ApiResponse({ status: 401, description: 'Invalid or expired mfa_token / wrong TOTP code' })
   async mfaChallenge(
     @Body() dto: MfaChallengeDto,
@@ -206,6 +210,50 @@ export class AuthController {
     @Headers('user-agent') userAgent: string,
   ) {
     return this.authService.recoverMfa(dto.mfa_token, dto.recovery_code, ip, userAgent);
+  }
+
+  @Post('mfa/send-email')
+  @ApiOperation({ summary: "Send a 6-digit OTP to the user's email (for email MFA flow)" })
+  @ApiResponse({ status: 201, description: 'OTP sent' })
+  @ApiResponse({ status: 401, description: 'Invalid or expired mfa_token' })
+  async mfaSendEmail(@Body() dto: SendMfaEmailDto) {
+    return this.authService.sendMfaEmailOtp(dto.mfa_token);
+  }
+
+  @Post('mfa/challenge/email')
+  @ApiOperation({ summary: 'Login step 2 (email OTP): submit emailed code → full token pair' })
+  @ApiResponse({ status: 201, description: 'Returns access_token + refresh_token + session_id' })
+  @ApiResponse({ status: 401, description: 'Invalid or expired OTP code or mfa_token' })
+  async mfaChallengeEmail(
+    @Body() dto: MfaEmailChallengeDto,
+    @Ip() ip: string,
+    @Headers('user-agent') userAgent: string,
+  ) {
+    return this.authService.verifyMfaEmailChallenge(dto.mfa_token, dto.code, ip, userAgent);
+  }
+
+  // ─── Invitation ───────────────────────────────────────────────────────────
+
+  @Get('accept-invite/:token')
+  @ApiOperation({ summary: 'Get invitation details (email, org, role) before accepting' })
+  @ApiResponse({ status: 200, description: 'Invitation info' })
+  @ApiResponse({ status: 400, description: 'Invitation expired or already used' })
+  @ApiResponse({ status: 404, description: 'Invitation not found' })
+  async getInvitation(@Param('token') token: string) {
+    return this.authService.getInvitation(token);
+  }
+
+  @Post('accept-invite')
+  @ApiOperation({ summary: 'Accept invitation — creates account and returns token pair' })
+  @ApiResponse({ status: 201, description: 'Account created, returns access_token + refresh_token + session_id' })
+  @ApiResponse({ status: 400, description: 'Invitation expired, already used, or passwords mismatch' })
+  @ApiResponse({ status: 404, description: 'Invitation not found' })
+  async acceptInvite(
+    @Body() dto: AcceptInviteDto,
+    @Ip() ip: string,
+    @Headers('user-agent') userAgent: string,
+  ) {
+    return this.authService.acceptInvite(dto, ip, userAgent);
   }
 
   // ─── Session management ───────────────────────────────────────────────────

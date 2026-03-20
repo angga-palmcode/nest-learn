@@ -1,6 +1,8 @@
 import {
   BadRequestException,
   ForbiddenException,
+  HttpException,
+  HttpStatus,
   Injectable,
   NotFoundException,
   UnauthorizedException,
@@ -21,12 +23,16 @@ import { MailService } from '../mail/mail.service';
 import { AuditService } from '../audit/audit.service';
 import { RegisterDto } from './dto/register.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
+import { AcceptInviteDto } from './dto/accept-invite.dto';
 import { JwtPayload } from './strategies/jwt.strategy';
 
 // Shared otplib plugin instances
 const otpCrypto = new NobleCryptoPlugin();
 const otpBase32 = new ScureBase32Plugin();
 const otpOptions = { crypto: otpCrypto, base32: otpBase32, strategy: 'totp' as const };
+
+const LOGIN_MAX_ATTEMPTS = 5;
+const LOGIN_LOCKOUT_MINUTES = 15;
 
 interface MfaPendingPayload {
   sub: string;
@@ -55,9 +61,44 @@ export class AuthService {
       return null;
     }
 
+    // Check lockout
+    if (user.locked_until && user.locked_until > new Date()) {
+      throw new HttpException(
+        'Account is temporarily locked due to too many failed login attempts. Please try again later.',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+
     const passwordValid = await bcrypt.compare(password, user.password);
+
     if (!passwordValid) {
+      const newAttempts = user.failed_login_attempts + 1;
+      const isLocked = newAttempts >= LOGIN_MAX_ATTEMPTS;
+      const lockedUntil = isLocked
+        ? new Date(Date.now() + LOGIN_LOCKOUT_MINUTES * 60 * 1000)
+        : null;
+
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: {
+          failed_login_attempts: newAttempts,
+          ...(isLocked ? { locked_until: lockedUntil } : {}),
+        },
+      });
+
+      if (isLocked) {
+        this.mail.sendAccountLockedEmail(user.email, lockedUntil!);
+      }
+
       return null;
+    }
+
+    // Reset on successful password check
+    if (user.failed_login_attempts > 0 || user.locked_until) {
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: { failed_login_attempts: 0, locked_until: null },
+      });
     }
 
     return user;
@@ -108,13 +149,15 @@ export class AuthService {
     if (user.mfa_enabled || user.org.mfa_enforced) {
       const mfaPayload: MfaPendingPayload = { sub: user.id, type: 'mfa_pending' };
       const mfa_token = await this.jwtService.signAsync(mfaPayload, { expiresIn: '5m' });
-      return { mfa_required: true, mfa_token };
+      // mfa_method tells the frontend which challenge flow to use
+      const mfa_method = user.mfa_enabled ? 'totp' : 'email';
+      return { mfa_required: true, mfa_token, mfa_method };
     }
 
     const tokens = await this.generateTokens(user);
 
     // Track session
-    await this.createSession(user.id, ip ?? '', userAgent ?? '', deviceName);
+    const session = await this.createSession(user.id, ip ?? '', userAgent ?? '', deviceName);
 
     await this.audit.log({
       orgId: user.org_id,
@@ -124,7 +167,7 @@ export class AuthService {
       metadata: { device_name: deviceName },
     });
 
-    return tokens;
+    return { ...tokens, session_id: session.id };
   }
 
   // ─── Register ─────────────────────────────────────────────────────────────
@@ -400,7 +443,7 @@ export class AuthService {
     if (!result.valid) throw new UnauthorizedException('Invalid TOTP code');
 
     const tokens = await this.generateTokens({ id: user.id, org_id: user.org_id, role: user.role });
-    await this.createSession(user.id, ip ?? '', userAgent ?? '', deviceName);
+    const session = await this.createSession(user.id, ip ?? '', userAgent ?? '', deviceName);
 
     await this.audit.log({
       orgId: user.org_id,
@@ -410,7 +453,7 @@ export class AuthService {
       ipAddress: ip,
     });
 
-    return tokens;
+    return { ...tokens, session_id: session.id };
   }
 
   // ─── MFA: login step 2 — recovery code ───────────────────────────────────
@@ -438,7 +481,7 @@ export class AuthService {
     });
 
     const tokens = await this.generateTokens({ id: user.id, org_id: user.org_id, role: user.role });
-    await this.createSession(user.id, ip ?? '', userAgent ?? '', deviceName);
+    const session = await this.createSession(user.id, ip ?? '', userAgent ?? '', deviceName);
 
     await this.audit.log({
       orgId: user.org_id,
@@ -448,7 +491,148 @@ export class AuthService {
       ipAddress: ip,
     });
 
-    return tokens;
+    return { ...tokens, session_id: session.id };
+  }
+
+  // ─── MFA: send email OTP ──────────────────────────────────────────────────
+
+  async sendMfaEmailOtp(mfaToken: string) {
+    const payload = await this.decodeMfaToken(mfaToken);
+    const user = await this.prisma.user.findUniqueOrThrow({ where: { id: payload.sub } });
+
+    // Invalidate any previous email OTP for this user
+    await this.prisma.mfaEmailToken.deleteMany({ where: { user_id: user.id } });
+
+    const code = String(Math.floor(100000 + Math.random() * 900000));
+    const codeHash = crypto.createHash('sha256').update(code).digest('hex');
+    const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes
+
+    await this.prisma.mfaEmailToken.create({
+      data: { user_id: user.id, code_hash: codeHash, expires_at: expiresAt },
+    });
+
+    this.mail.sendMfaEmailOtp(user.email, code);
+
+    return { message: 'OTP sent to your email.' };
+  }
+
+  // ─── MFA: login step 2 — email OTP challenge ─────────────────────────────
+
+  async verifyMfaEmailChallenge(mfaToken: string, code: string, ip?: string, userAgent?: string, deviceName?: string) {
+    const payload = await this.decodeMfaToken(mfaToken);
+    const user = await this.prisma.user.findUniqueOrThrow({ where: { id: payload.sub } });
+
+    const codeHash = crypto.createHash('sha256').update(code).digest('hex');
+
+    const emailToken = await this.prisma.mfaEmailToken.findFirst({
+      where: { user_id: user.id, expires_at: { gt: new Date() } },
+    });
+
+    if (!emailToken || emailToken.code_hash !== codeHash) {
+      throw new UnauthorizedException('Invalid or expired OTP code');
+    }
+
+    // Consume the token
+    await this.prisma.mfaEmailToken.delete({ where: { id: emailToken.id } });
+
+    const tokens = await this.generateTokens({ id: user.id, org_id: user.org_id, role: user.role });
+    const session = await this.createSession(user.id, ip ?? '', userAgent ?? '', deviceName);
+
+    await this.audit.log({
+      orgId: user.org_id,
+      userId: user.id,
+      action: 'user.login',
+      metadata: { mfa_method: 'email_otp' },
+      ipAddress: ip,
+    });
+
+    return { ...tokens, session_id: session.id };
+  }
+
+  // ─── Invitation: get info ─────────────────────────────────────────────────
+
+  async getInvitation(token: string) {
+    const invitation = await this.prisma.userInvitation.findUnique({
+      where: { token },
+      include: { org: true },
+    });
+
+    if (!invitation) throw new NotFoundException('Invitation not found');
+    if (invitation.expires_at < new Date()) throw new BadRequestException('Invitation has expired');
+    if (invitation.accepted_at) throw new BadRequestException('Invitation has already been used');
+
+    return {
+      email: invitation.email,
+      role: invitation.role,
+      org: { name: invitation.org.name, slug: invitation.org.slug },
+    };
+  }
+
+  // ─── Invitation: accept ───────────────────────────────────────────────────
+
+  async acceptInvite(dto: AcceptInviteDto, ip?: string, userAgent?: string) {
+    if (dto.password !== dto.password_confirmation) {
+      throw new BadRequestException('Passwords do not match');
+    }
+
+    const invitation = await this.prisma.userInvitation.findUnique({
+      where: { token: dto.token },
+      include: { org: true },
+    });
+
+    if (!invitation) throw new NotFoundException('Invitation not found');
+    if (invitation.expires_at < new Date()) throw new BadRequestException('Invitation has expired');
+    if (invitation.accepted_at) throw new BadRequestException('Invitation has already been used');
+
+    const existing = await this.prisma.user.findUnique({ where: { email: invitation.email } });
+    if (existing) throw new BadRequestException('An account with this email already exists');
+
+    const hashed = await bcrypt.hash(dto.password, 10);
+
+    const user = await this.prisma.user.create({
+      data: {
+        name: dto.name,
+        email: invitation.email,
+        password: hashed,
+        role: invitation.role,
+        org_id: invitation.org_id,
+        email_verified_at: new Date(), // auto-verified via invite
+        invited_by: invitation.invited_by,
+        invited_at: invitation.created_at,
+      },
+    });
+
+    await this.prisma.userInvitation.update({
+      where: { id: invitation.id },
+      data: { accepted_at: new Date() },
+    });
+
+    await this.audit.log({
+      orgId: invitation.org_id,
+      userId: user.id,
+      action: 'user.registered',
+      resourceType: 'User',
+      resourceId: user.id,
+      metadata: { via: 'invitation' },
+    });
+
+    const tokens = await this.generateTokens({ id: user.id, org_id: user.org_id, role: user.role });
+    const session = await this.createSession(user.id, ip ?? '', userAgent ?? '');
+
+    await this.audit.log({
+      orgId: user.org_id,
+      userId: user.id,
+      action: 'user.login',
+      ipAddress: ip,
+      metadata: { via: 'accept_invite' },
+    });
+
+    return {
+      access_token: tokens.access_token,
+      refresh_token: tokens.refresh_token,
+      session_id: session.id,
+      user: { id: user.id, name: user.name, email: user.email, role: user.role },
+    };
   }
 
   // ─── Profile ──────────────────────────────────────────────────────────────
