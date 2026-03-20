@@ -20,6 +20,7 @@ import {
 import { Roles } from '../auth/decorators/roles.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
+import { PERMISSIONS } from '../auth/permissions';
 import { ChangeRoleDto } from './dto/change-role.dto';
 import { InviteUserDto } from './dto/invite-user.dto';
 import { ListUsersDto } from './dto/list-users.dto';
@@ -33,7 +34,7 @@ export class UsersController {
   constructor(private readonly usersService: UsersService) {}
 
   @Get()
-  @Roles('admin', 'manager')
+  @Roles(...PERMISSIONS.USERS_LIST)
   @ApiOperation({ summary: 'List all users in the organisation (admin + manager)' })
   @ApiResponse({ status: 200, description: 'Paginated user list' })
   async listUsers(@Request() req: any, @Query() query: ListUsersDto) {
@@ -41,7 +42,7 @@ export class UsersController {
   }
 
   @Post('invite')
-  @Roles('admin')
+  @Roles(...PERMISSIONS.USERS_INVITE)
   @ApiOperation({ summary: 'Invite a new user to the organisation (admin only)' })
   @ApiResponse({ status: 201, description: 'Invitation sent' })
   @ApiResponse({ status: 400, description: 'User already a member or invitation already pending' })
@@ -50,7 +51,7 @@ export class UsersController {
   }
 
   @Put(':id/role')
-  @Roles('admin')
+  @Roles(...PERMISSIONS.USERS_CHANGE_ROLE)
   @ApiOperation({ summary: 'Change a user\'s role (admin only, cannot change own role)' })
   @ApiResponse({ status: 200, description: 'Role updated' })
   @ApiResponse({ status: 403, description: 'Cannot change own role' })
@@ -65,7 +66,7 @@ export class UsersController {
   }
 
   @Put(':id/deactivate')
-  @Roles('admin')
+  @Roles(...PERMISSIONS.USERS_DEACTIVATE)
   @ApiOperation({ summary: 'Deactivate a user — revokes all tokens + sessions (admin only)' })
   @ApiResponse({ status: 200, description: 'User deactivated' })
   @ApiResponse({ status: 403, description: 'Cannot deactivate self' })
@@ -74,7 +75,7 @@ export class UsersController {
   }
 
   @Put(':id/activate')
-  @Roles('admin')
+  @Roles(...PERMISSIONS.USERS_ACTIVATE)
   @ApiOperation({ summary: 'Reactivate a deactivated user (admin only)' })
   @ApiResponse({ status: 200, description: 'User activated' })
   async activateUser(@Request() req: any, @Param('id') id: string, @Ip() ip: string) {
@@ -82,7 +83,7 @@ export class UsersController {
   }
 
   @Delete(':id/force-logout')
-  @Roles('admin')
+  @Roles(...PERMISSIONS.USERS_FORCE_LOGOUT)
   @ApiOperation({ summary: 'Force logout a user — revokes all tokens + sessions (admin only)' })
   @ApiResponse({ status: 200, description: 'User logged out' })
   async forceLogout(@Request() req: any, @Param('id') id: string, @Ip() ip: string) {
