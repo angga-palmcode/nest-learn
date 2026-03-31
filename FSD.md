@@ -1546,3 +1546,310 @@ async runDialerCycle(campaignId: string): Promise<void> {
 | AC-CAM-07 | Campaign cannot be activated without a valid disclosure | Remove disclosure → attempt activate → 400 |
 
 ---
+## Module 6 — Lead Management
+
+### Overview
+
+Leads represent individual contacts to be called within a campaign. Each lead has a lifecycle tracked via `LeadStatus`. This module exposes endpoints to view, filter, update, and export leads for a campaign.
+
+### 6.1 Lead Status Lifecycle
+
+```
+new → queued → calling → contacted / interested / not_interested / callback_scheduled / failed / max_attempts_reached / dnc
+```
+
+| Status | Description |
+|---|---|
+| `new` | Just imported, not yet scheduled |
+| `queued` | Scheduled by the dialer engine |
+| `calling` | Active call in progress |
+| `contacted` | Call connected, no definitive intent recorded |
+| `interested` | Lead expressed interest |
+| `not_interested` | Lead declined |
+| `converted` | Lead converted to customer |
+| `callback_scheduled` | Lead requested a callback |
+| `dnc` | Do-Not-Call — permanent terminal state |
+| `failed` | Technical failure during call |
+| `max_attempts_reached` | Exhausted `max_attempts_per_lead` without contact |
+
+**DNC rule:** Once a lead reaches `dnc`, it can NEVER be moved to any other status via the application. Attempting to update a `dnc` lead returns HTTP 403.
+
+### 6.2 API Endpoints
+
+| Method | Path | Role | Body / Query | Description |
+|--------|------|------|-------------|-------------|
+| GET | `/campaigns/:campaign_id/leads` | admin, manager | `?status=&search=&sort=&page=&page_size=` | List leads with filters + pagination |
+| GET | `/campaigns/:campaign_id/leads/export` | admin, manager | same filters (no pagination) | Download leads as CSV |
+| GET | `/campaigns/:campaign_id/leads/:id` | admin, manager | — | Get lead details + full call history |
+| PUT | `/campaigns/:campaign_id/leads/:id` | admin, manager | `{ status?, callback_notes?, next_call_at?, callback_requested_at? }` | Update lead |
+
+#### List / Export filters
+
+| Field | Type | Notes |
+|---|---|---|
+| `status` | string | Comma-separated list of statuses |
+| `search` | string | Searches name, phone_number, email |
+| `sort` | string | Field name, prefix `-` for desc (e.g. `-created_at`) |
+| `page` / `page_size` | int | Pagination (list only; export ignores these) |
+
+#### `GET /:id` response shape
+
+```json
+{
+  "data": {
+    "id": "...",
+    "name": "...",
+    "phone_number": "+46701234567",
+    "status": "callback_scheduled",
+    "call_attempts": 2,
+    "last_called_at": "...",
+    "calls": [
+      {
+        "id": "...",
+        "status": "completed",
+        "started_at": "...",
+        "ended_at": "...",
+        "duration_seconds": 42,
+        "intent_result": "callback_requested"
+      }
+    ]
+  }
+}
+```
+
+#### `PUT /:id` — writable statuses only
+
+`dnc` and `max_attempts_reached` cannot be set via this endpoint. They are set by the dialer engine internally.
+
+### 6.3 Lead Model (Module 6 schema)
+
+| Column | Type | Notes |
+|---|---|---|
+| id | UUID PK | auto |
+| org_id | UUID FK → Organization | |
+| campaign_id | UUID FK → Campaign | |
+| name | VARCHAR(255) | |
+| phone_number | VARCHAR(20) | E.164 format (was `phone`) |
+| email | VARCHAR(255) NULLABLE | |
+| status | LeadStatus | default `new` |
+| call_attempts | INT | default 0 (was `attempt_count`) |
+| last_called_at | TIMESTAMP NULLABLE | (was `last_attempted_at`) |
+| next_call_at | TIMESTAMP NULLABLE | Scheduled next dial time |
+| callback_requested_at | TIMESTAMP NULLABLE | |
+| callback_notes | TEXT NULLABLE | |
+| custom_fields | JSON NULLABLE | |
+| upload_id | VARCHAR(255) NULLABLE | LeadUpload reference |
+| timezone | VARCHAR(50) NULLABLE | Lead's local timezone |
+| created_at / updated_at / deleted_at | TIMESTAMP | soft delete |
+
+### 6.4 Acceptance Criteria
+
+| ID | Scenario | Expected |
+|---|---|---|
+| AC-LEAD-01 | List leads for a campaign | Returns paginated list scoped to org + campaign |
+| AC-LEAD-02 | Search by phone number fragment | Returns matching leads |
+| AC-LEAD-03 | Filter by multiple statuses | `?status=interested,callback_scheduled` returns only those |
+| AC-LEAD-04 | Get lead with call history | Returns lead + `calls[]` array ordered by `created_at` desc |
+| AC-LEAD-05 | Update lead status | Status changes persisted; audit log created |
+| AC-LEAD-06 | Attempt to update a `dnc` lead | Returns 403 |
+| AC-LEAD-07 | Attempt to set status to `dnc` via API | Returns 422 (validation — `dnc` not in enum) |
+| AC-LEAD-08 | Export leads to CSV | CSV file with correct headers and all matching leads |
+| AC-LEAD-09 | Access lead in wrong campaign | Returns 404 |
+
+---
+
+## Module 7 — Analytics Dashboard
+
+**PRD References:** ANA-001 through ANA-005
+**Priority:** HIGH
+
+### 7.1 Overview
+
+The analytics dashboard is Erik's primary tool for monitoring campaign performance. Two endpoints provide aggregated metrics — a main dashboard summary and a per-campaign drill-down — both scoped to org and filterable by date range.
+
+### 7.2 API Endpoints
+
+#### `GET /analytics/dashboard`
+
+Main dashboard summary.
+
+| Query param | Default | Description |
+|---|---|---|
+| `date_from` | today (00:00 UTC) | ISO 8601 date |
+| `date_to` | today (23:59 UTC) | ISO 8601 date |
+
+**Response:**
+```json
+{
+  "data": {
+    "active_campaigns": 3,
+    "calls_today": 245,
+    "calls_answered_today": 178,
+    "connection_rate_today": 0.7265,
+    "conversions_today": 23,
+    "calls_by_hour": [
+      { "hour": 9, "placed": 30, "answered": 22 },
+      { "hour": 10, "placed": 45, "answered": 33 }
+    ]
+  }
+}
+```
+
+#### `GET /analytics/campaigns/:id`
+
+Campaign drill-down analytics.
+
+| Query param | Default | Description |
+|---|---|---|
+| `date_from` | today | ISO 8601 date |
+| `date_to` | today | ISO 8601 date |
+| `granularity` | `day` | `hour`, `day`, `week`, or `month` |
+
+**Response:**
+```json
+{
+  "data": {
+    "summary": {
+      "total_calls": 1250,
+      "total_answered": 908,
+      "connection_rate": 0.7264,
+      "total_conversions": 127,
+      "conversion_rate": 0.1016,
+      "average_duration_seconds": 95,
+      "total_cost": 4375.50,
+      "cost_per_call": 3.50,
+      "cost_per_conversion": 34.45
+    },
+    "funnel": {
+      "total_leads": 2000,
+      "contacted": 908,
+      "interested": 342,
+      "converted": 127
+    },
+    "intent_distribution": {
+      "interested": 342,
+      "not_interested": 401,
+      "callback_requested": 89,
+      "dnc_requested": 34,
+      "undetermined": 42
+    },
+    "calls_over_time": [
+      { "date": "2026-03-01", "placed": 420, "answered": 305, "failed": 12 }
+    ]
+  }
+}
+```
+
+### 7.3 Metric Definitions
+
+| Metric | Calculation |
+|---|---|
+| `connection_rate` | `total_answered / total_calls` |
+| `conversion_rate` | `total_conversions / total_calls` |
+| `cost_per_call` | `total_cost / total_calls` |
+| `cost_per_conversion` | `total_cost / total_conversions` |
+| `funnel.contacted` | Leads with status in `contacted, interested, not_interested, converted, callback_scheduled` |
+| `funnel.interested` | Leads with status in `interested, converted` |
+| `calls_over_time.answered` | Calls with status `answered` or `completed` |
+| `calls_over_time.failed` | Calls with status `failed` |
+
+### 7.4 Acceptance Criteria
+
+| ID | Criterion | How to Verify |
+|---|---|---|
+| AC-ANA-01 | Dashboard loads in < 2 seconds with 100K+ call records | Performance test with seeded data |
+| AC-ANA-02 | Real-time metrics update within 30 seconds of a call completing | Complete call → dashboard reflects new data within 30s |
+| AC-ANA-03 | Conversion funnel numbers are mathematically consistent | Verify: contacted ≥ interested ≥ converted |
+| AC-ANA-04 | Cost tracking matches sum of individual call costs | Sum calls.cost_amount → compare to analytics total |
+| AC-ANA-05 | Date range filter correctly scopes all metrics | Filter to 1 day → verify only that day's data shown |
+
+---
+
+## Module 8 — Integration & Webhooks
+
+**PRD References:** INT-001, TEC-001
+**Priority:** HIGH
+
+### 8.1 Overview
+
+The webhook system allows external systems to subscribe to Astos events (call completions, lead updates, campaign state changes) and receive real-time POST notifications. Each delivery is signed with HMAC-SHA256 so receivers can verify authenticity.
+
+### 8.2 WebhookEndpoint Model
+
+| Column | Type | Notes |
+|---|---|---|
+| id | UUID PK | auto |
+| org_id | UUID FK → Organization | |
+| url | VARCHAR(500) | HTTPS delivery URL |
+| secret | VARCHAR(255) | 64-char hex signing secret (auto-generated) |
+| events | JSON | Array of subscribed event strings |
+| is_active | BOOLEAN | default true |
+| created_at / updated_at | TIMESTAMP | |
+
+### 8.3 API Endpoints
+
+| Method | Path | Role | Body | Description |
+|--------|------|------|------|-------------|
+| POST | `/webhooks` | admin | `{ url, events[] }` | Register endpoint; secret auto-generated |
+| GET | `/webhooks` | admin | — | List all org endpoints |
+| GET | `/webhooks/:id` | admin | — | Get endpoint detail |
+| PUT | `/webhooks/:id` | admin | `{ url?, events[]?, is_active? }` | Update endpoint |
+| DELETE | `/webhooks/:id` | admin | — | Delete endpoint |
+| POST | `/webhooks/:id/rotate-secret` | admin | — | Rotate signing secret |
+
+### 8.4 Webhook Delivery
+
+Every delivery is a POST to the registered URL with headers:
+
+```
+Content-Type: application/json
+X-Astos-Signature: sha256=<HMAC-SHA256(body, secret)>
+X-Astos-Event: call.completed
+X-Astos-Delivery: <uuid>
+X-Astos-Timestamp: 2026-03-03T14:30:00Z
+```
+
+**Retry policy:** 3 attempts, delays 10s → 60s → 300s. Per-attempt timeout: 10 seconds.
+
+**Payload example (`call.completed`):**
+```json
+{
+  "event": "call.completed",
+  "timestamp": "2026-03-03T14:30:00Z",
+  "data": {
+    "call_id": "uuid",
+    "campaign_id": "uuid",
+    "lead_id": "uuid",
+    "status": "completed",
+    "duration_seconds": 120,
+    "intent_result": "interested",
+    "from_number": "+46812345678",
+    "to_number": "+46701234567"
+  }
+}
+```
+
+### 8.5 Event Types
+
+| Event | Trigger |
+|---|---|
+| `call.started` | Call begins |
+| `call.completed` | Call ends with any terminal status |
+| `call.failed` | Call fails (provider error) |
+| `lead.updated` | Lead status or fields changed |
+| `lead.converted` | Lead status set to `converted` |
+| `campaign.activated` | Campaign status → active |
+| `campaign.paused` | Campaign status → paused |
+| `campaign.completed` | Campaign status → completed |
+
+### 8.6 Acceptance Criteria
+
+| ID | Criterion | How to Verify |
+|---|---|---|
+| AC-INT-01 | Webhooks are delivered within 5 seconds of event | Measure time from call completion to webhook receipt |
+| AC-INT-02 | Webhook signature is verifiable by recipient | Compute HMAC on receiving end → matches `X-Astos-Signature` header |
+| AC-INT-03 | Failed webhooks retry 3 times with backoff | Return 500 from webhook URL → verify 3 retries at 10s / 60s / 300s |
+| AC-INT-04 | Rotating secret invalidates old signature | Rotate → old secret no longer verifies new deliveries |
+| AC-INT-05 | Inactive endpoints receive no deliveries | Set `is_active=false` → dispatch fires → endpoint not called |
+
+---

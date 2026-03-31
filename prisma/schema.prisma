@@ -30,6 +30,7 @@ model Organization {
   calls                Call[]
   campaigns            Campaign[]
   leads                Lead[]
+  webhookEndpoints     WebhookEndpoint[]
 }
 
 enum UserRole {
@@ -331,13 +332,17 @@ enum CampaignAmdAction {
 }
 
 enum LeadStatus {
-  pending
-  in_progress
+  new
+  queued
+  calling
   contacted
+  interested
+  not_interested
   converted
+  callback_scheduled
   dnc
   failed
-  skipped
+  max_attempts_reached
 }
 
 enum UploadStatus {
@@ -383,23 +388,30 @@ model Campaign {
 }
 
 model Lead {
-  id                String     @id @default(uuid())
-  org_id            String
-  org               Organization @relation(fields: [org_id], references: [id])
-  campaign_id       String
-  campaign          Campaign   @relation(fields: [campaign_id], references: [id])
-  name              String     @db.VarChar(255)
-  phone             String     @db.VarChar(20)
-  email             String?    @db.VarChar(255)
-  status            LeadStatus @default(pending)
-  attempt_count     Int        @default(0)
-  last_attempted_at DateTime?
-  custom_fields     Json?
-  created_at        DateTime   @default(now())
-  updated_at        DateTime   @updatedAt
+  id                    String     @id @default(uuid())
+  org_id                String
+  org                   Organization @relation(fields: [org_id], references: [id])
+  campaign_id           String
+  campaign              Campaign   @relation(fields: [campaign_id], references: [id])
+  name                  String     @db.VarChar(255)
+  phone_number          String     @db.VarChar(20)
+  email                 String?    @db.VarChar(255)
+  status                LeadStatus @default(new)
+  call_attempts         Int        @default(0)
+  last_called_at        DateTime?
+  next_call_at          DateTime?
+  callback_requested_at DateTime?
+  callback_notes        String?    @db.Text
+  custom_fields         Json?
+  upload_id             String?    @db.VarChar(255)
+  timezone              String?    @db.VarChar(50)
+  created_at            DateTime   @default(now())
+  updated_at            DateTime   @updatedAt
+  deleted_at            DateTime?
 
-  @@index([campaign_id, status])
-  @@index([campaign_id, phone])
+  @@index([org_id, campaign_id, status])
+  @@index([org_id, phone_number])
+  @@index([campaign_id, next_call_at])
 }
 
 model LeadUpload {
@@ -415,4 +427,20 @@ model LeadUpload {
   errors         Json?
   created_at     DateTime     @default(now())
   updated_at     DateTime     @updatedAt
+}
+
+// ─── Webhooks ─────────────────────────────────────────────────────────────────
+
+model WebhookEndpoint {
+  id         String       @id @default(uuid())
+  org_id     String
+  org        Organization @relation(fields: [org_id], references: [id])
+  url        String       @db.VarChar(500)
+  secret     String       @db.VarChar(255)
+  events     Json
+  is_active  Boolean      @default(true)
+  created_at DateTime     @default(now())
+  updated_at DateTime     @updatedAt
+
+  @@index([org_id, is_active])
 }

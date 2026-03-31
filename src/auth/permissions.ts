@@ -37,6 +37,18 @@ export const PERMISSIONS = {
   CAMPAIGNS_DELETE:       ['admin'] as const,
   CAMPAIGNS_LEADS_UPLOAD: ['admin', 'manager'] as const,
 
+  // ─── Leads ────────────────────────────────────────────────────────────────
+  LEADS_READ:   ['admin', 'manager'] as const,
+  LEADS_WRITE:  ['admin', 'manager'] as const,
+  LEADS_EXPORT: ['admin', 'manager'] as const,
+
+  // ─── Analytics ────────────────────────────────────────────────────────────
+  ANALYTICS_READ: ['admin', 'manager'] as const,
+
+  // ─── Webhooks ─────────────────────────────────────────────────────────────
+  WEBHOOKS_READ:  ['admin'] as const,
+  WEBHOOKS_WRITE: ['admin'] as const,
+
   // ─── AI Voice Pipeline ────────────────────────────────────────────────────
   AI_VOICES_READ:       ['admin', 'manager', 'agent'] as const,
   AI_SCRIPTS_VALIDATE:  ['admin', 'manager'] as const,

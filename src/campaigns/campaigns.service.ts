@@ -387,7 +387,7 @@ export class CampaignsService {
         }
 
         const existing = await this.prisma.lead.findFirst({
-          where: { campaign_id: campaignId, phone: phone! },
+          where: { campaign_id: campaignId, phone_number: phone! },
         });
         if (existing) {
           duplicateRows++;
@@ -404,7 +404,7 @@ export class CampaignsService {
             org_id: orgId,
             campaign_id: campaignId,
             name: rowData['name'].trim(),
-            phone: phone!,
+            phone_number: phone!,
             email: rowData['email']?.trim() || null,
             custom_fields: Object.keys(customFields).length ? customFields : undefined,
           },

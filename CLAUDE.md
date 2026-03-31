@@ -9,6 +9,9 @@
 | 3 | Telephony | ✅ Done | `Call` model, list/get/recording/transcript endpoints, Telnyx + Twilio adapters (stubs), provider failover, `placeCall()` internal method |
 | 4 | AI Voice Pipeline | ✅ Done (NestJS part) | Voices list, voice preview stub, script validator. STT/LLM/TTS pipeline is Python — not in this repo. |
 | 5 | Campaign Management | ✅ Done | `Campaign`, `Lead`, `LeadUpload` models, full CRUD, activate/pause/resume actions, CSV lead upload with async processing |
+| 6 | Lead Management | ✅ Done | Expanded `Lead` model (renamed columns, new fields, full `LeadStatus` enum), list/get/update/export endpoints, DNC terminal-state protection |
+| 7 | Analytics Dashboard | ✅ Done | `GET /analytics/dashboard` (summary + hourly chart), `GET /analytics/campaigns/:id` (summary, funnel, intent distribution, calls over time with granularity) |
+| 8 | Integration & Webhooks | ✅ Done | `WebhookEndpoint` model, CRUD endpoints, HMAC-SHA256 signed delivery, 3-attempt retry with exponential backoff, `dispatch()` internal method, secret rotation |
 
 ---
 
@@ -155,6 +158,30 @@ src/
 │       ├── create-campaign.dto.ts
 │       ├── update-campaign.dto.ts
 │       └── list-campaigns.dto.ts
+│
+├── webhooks/                   Integration & Webhooks module
+│   ├── webhooks.module.ts
+│   ├── webhooks.service.ts
+│   ├── webhooks.controller.ts
+│   └── dto/
+│       ├── create-webhook.dto.ts
+│       └── update-webhook.dto.ts
+│
+├── analytics/                  Analytics Dashboard module
+│   ├── analytics.module.ts
+│   ├── analytics.service.ts
+│   ├── analytics.controller.ts
+│   └── dto/
+│       ├── dashboard-query.dto.ts
+│       └── campaign-analytics-query.dto.ts
+│
+├── leads/                      Lead Management module
+│   ├── leads.module.ts
+│   ├── leads.service.ts
+│   ├── leads.controller.ts
+│   └── dto/
+│       ├── list-leads.dto.ts
+│       └── update-lead.dto.ts
 │
 ├── telephony/                  Telephony module (Telnyx + Twilio)
 │   ├── telephony.module.ts
@@ -354,13 +381,18 @@ prisma/
 | org_id | UUID FK → Organization | |
 | campaign_id | UUID FK → Campaign | |
 | name | VARCHAR(255) | |
-| phone | VARCHAR(20) | E.164 format |
+| phone_number | VARCHAR(20) | E.164 format |
 | email | VARCHAR(255) NULLABLE | |
-| status | ENUM(pending, in_progress, contacted, converted, dnc, failed, skipped) | default pending |
-| attempt_count | INT | default 0 |
-| last_attempted_at | TIMESTAMP NULLABLE | |
+| status | ENUM(new, queued, calling, contacted, interested, not_interested, converted, callback_scheduled, dnc, failed, max_attempts_reached) | default new |
+| call_attempts | INT | default 0 |
+| last_called_at | TIMESTAMP NULLABLE | |
+| next_call_at | TIMESTAMP NULLABLE | Scheduled next call time |
+| callback_requested_at | TIMESTAMP NULLABLE | When lead requested callback |
+| callback_notes | TEXT NULLABLE | |
 | custom_fields | JSON NULLABLE | Extra CSV columns |
-| created_at / updated_at | TIMESTAMP | |
+| upload_id | VARCHAR(255) NULLABLE | LeadUpload.id that created this lead |
+| timezone | VARCHAR(50) NULLABLE | Lead's local timezone |
+| created_at / updated_at / deleted_at | TIMESTAMP | soft delete |
 
 ### `LeadUpload`
 | Column | Type | Notes |
@@ -371,6 +403,17 @@ prisma/
 | status | ENUM(processing, completed, failed) | default processing |
 | total_rows / valid_rows / invalid_rows / duplicate_rows | INT | |
 | errors | JSON NULLABLE | `[{row, field, error}]` |
+| created_at / updated_at | TIMESTAMP | |
+
+### `WebhookEndpoint`
+| Column | Type | Notes |
+|---|---|---|
+| id | UUID PK | auto |
+| org_id | UUID FK → Organization | |
+| url | VARCHAR(500) | HTTPS delivery URL |
+| secret | VARCHAR(255) | 64-char hex HMAC-SHA256 signing secret |
+| events | JSON | Array of subscribed event strings |
+| is_active | BOOLEAN | default true |
 | created_at / updated_at | TIMESTAMP | |
 
 ### `Call`
@@ -503,6 +546,15 @@ prisma/
 | POST | `/campaigns/:id/leads/upload` | admin, manager | `multipart/form-data: file, field_mapping (JSON), skip_first_row` | Upload CSV leads → 202 + upload_id |
 | GET | `/campaigns/:id/leads/uploads/:upload_id` | admin, manager | — | Check upload status |
 
+### Leads (`/campaigns/:campaign_id/leads`) — all require JWT
+
+| Method | Path | Role | Body / Query | Description |
+|--------|------|------|-------------|-------------|
+| GET | `/campaigns/:campaign_id/leads` | admin, manager | `?status=&search=&sort=&page=&page_size=` | List leads with filters + pagination |
+| GET | `/campaigns/:campaign_id/leads/export` | admin, manager | same filters (no pagination) | Download leads as CSV |
+| GET | `/campaigns/:campaign_id/leads/:id` | admin, manager | — | Get lead details + full call history |
+| PUT | `/campaigns/:campaign_id/leads/:id` | admin, manager | `{ status?, callback_notes?, next_call_at?, callback_requested_at? }` | Update lead (DNC leads are immutable) |
+
 ### Calls (`/calls`) — all require JWT
 
 | Method | Path | Role | Body / Query | Description |
@@ -511,6 +563,24 @@ prisma/
 | GET | `/calls/:id` | admin, manager | — | Get call details + compliance checks |
 | GET | `/calls/:id/recording` | admin, manager | — | Get pre-signed recording URL (expires 1h) |
 | GET | `/calls/:id/transcript` | admin, manager | — | Get call transcript |
+
+### Analytics (`/analytics`) — all require JWT
+
+| Method | Path | Role | Body / Query | Description |
+|--------|------|------|-------------|-------------|
+| GET | `/analytics/dashboard` | admin, manager | `?date_from=&date_to=` | Main dashboard: active campaigns, calls today, connection rate, conversions, hourly chart |
+| GET | `/analytics/campaigns/:id` | admin, manager | `?date_from=&date_to=&granularity=day\|hour\|week\|month` | Campaign analytics: summary, funnel, intent distribution, calls over time |
+
+### Webhooks (`/webhooks`) — all require JWT
+
+| Method | Path | Role | Body / Query | Description |
+|--------|------|------|-------------|-------------|
+| POST | `/webhooks` | admin | `{ url, events[] }` | Register a webhook endpoint (secret auto-generated) |
+| GET | `/webhooks` | admin | — | List webhook endpoints for the org |
+| GET | `/webhooks/:id` | admin | — | Get a webhook endpoint |
+| PUT | `/webhooks/:id` | admin | `{ url?, events[]?, is_active? }` | Update a webhook endpoint |
+| DELETE | `/webhooks/:id` | admin | — | Delete a webhook endpoint |
+| POST | `/webhooks/:id/rotate-secret` | admin | — | Rotate signing secret → returns new secret |
 
 ---
 
@@ -688,6 +758,20 @@ req.user  // → { userId, orgId, role }
 - **Campaign `schedule_start_time` / `schedule_end_time`** — stored as `VARCHAR(5)` strings in `HH:MM` format (not a DB TIME type). Parse with `split(':')` to get hours/minutes.
 - **CSV lead upload is async** — `POST /campaigns/:id/leads/upload` returns 202 immediately with an `upload_id`. Processing happens in the background via an unawaited Promise. Poll `GET /campaigns/:id/leads/uploads/:upload_id` for completion.
 - **Phone normalization in CSV upload** — Swedish numbers without country code (`07XXXXXXXX`) are automatically prefixed with `+46`. Numbers starting with `00` are converted to `+`. E.164 numbers with `+` are accepted as-is.
-- **Duplicate lead detection** — during CSV upload, a lead is considered a duplicate if the same `phone` already exists in the campaign. Duplicates are counted but not re-created.
+- **Duplicate lead detection** — during CSV upload, a lead is considered a duplicate if the same `phone_number` already exists in the campaign. Duplicates are counted but not re-created.
 - **Campaign activate preconditions** — (1) status must be `draft` or `paused`, (2) must have ≥1 lead, (3) `disclosure_id` must point to an existing disclosure in the org.
 - **`leadStats` include** — appended to each campaign in `GET /campaigns` when `include=leadStats`. Adds `{ total, contacted, converted }` counts via separate count queries.
+- **Lead DNC is a terminal state** — `PUT /campaigns/:campaign_id/leads/:id` throws 403 if the lead's current status is `dnc`. The `dnc` and `max_attempts_reached` statuses are also excluded from the `status` field in `UpdateLeadDto`; they can only be set by the dialer engine internally.
+- **Lead `export` route before `/:id`** — `GET /campaigns/:campaign_id/leads/export` must be declared before `GET /campaigns/:campaign_id/leads/:id` in the controller to avoid NestJS routing `export` as an `:id` param.
+- **Lead CSV export** — synchronous, streams directly to response using `res.write()` / `res.end()`. No pagination — returns all matching leads. Controller uses `@Res()` with `import type { Response }` (required for `isolatedModules`).
+- **Lead schema migration (Module 6)** — applied via `npx prisma db push --accept-data-loss` (non-interactive shell). Manual migration file at `prisma/migrations/20260331060000_lead_management/migration.sql` for tracking. Renamed: `phone→phone_number`, `attempt_count→call_attempts`, `last_attempted_at→last_called_at`.
+- **Analytics uses raw SQL (`$queryRaw`)** — hourly grouping (`EXTRACT(HOUR FROM started_at)`) and `DATE_TRUNC` for time-series are not expressible via Prisma's query API. Raw SQL is scoped to org + campaign via parameterized `orgId`/`campaignId` — no injection risk.
+- **Analytics `granularity` inlined via `Prisma.raw`** — validated to one of `['hour', 'day', 'week', 'month']` by DTO `@IsIn` before use in `DATE_TRUNC`. Never pass unvalidated user input to `Prisma.raw`.
+- **Analytics cost fields** — `aggregates._sum.cost_amount` returns a `Decimal | null`; convert with `.toString()` before `parseFloat`. Never compare Prisma Decimals directly.
+- **`funnel.contacted`** — counts leads whose status is any of `contacted, interested, not_interested, converted, callback_scheduled` (all states that imply at least one successful contact).
+- **Webhook secret auto-generated** — `POST /webhooks` generates a 64-char hex secret via `crypto.randomBytes(32)`. The secret is returned only in the creation response and on `POST /webhooks/:id/rotate-secret`. It is never returned in list/get responses.
+- **Webhook HMAC-SHA256 signature** — payload is the raw JSON body string. Signature header: `X-Astos-Signature: sha256=<hex>`. Receivers verify with `HMAC-SHA256(body, secret)`.
+- **Webhook retry policy** — 3 attempts with delays 10s → 60s → 300s. Implemented as recursive async calls with `setTimeout`. After all retries exhausted, logs an error. No persistent delivery log table — failures are console-only.
+- **Webhook delivery uses native `fetch`** — available in Node.js 22 without `node-fetch`. Uses `AbortSignal.timeout(10_000)` for a 10-second per-attempt timeout.
+- **`dispatch()` is fire-and-forget** — call sites (e.g. dialer engine) call `webhooksService.dispatch(orgId, payload)` without `await`. Errors are caught internally and logged.
+- **Webhook `events` validation** — `@Matches(/^(call|lead|campaign)\.\w+$/, { each: true })` allows any `domain.action` pattern matching those three namespaces. Extend the regex when new domains are added.

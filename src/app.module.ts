@@ -11,6 +11,9 @@ import { UsersModule } from './users/users.module';
 import { ComplianceModule } from './compliance/compliance.module';
 import { TelephonyModule } from './telephony/telephony.module';
 import { CampaignsModule } from './campaigns/campaigns.module';
+import { LeadsModule } from './leads/leads.module';
+import { AnalyticsModule } from './analytics/analytics.module';
+import { WebhooksModule } from './webhooks/webhooks.module';
 import { AiModule } from './ai/ai.module';
 
 @Module({
@@ -25,6 +28,9 @@ import { AiModule } from './ai/ai.module';
     ComplianceModule,
     TelephonyModule,
     CampaignsModule,
+    LeadsModule,
+    AnalyticsModule,
+    WebhooksModule,
     AiModule,
   ],
   controllers: [AppController],
