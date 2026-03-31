@@ -9,6 +9,7 @@ import { OrganizationsModule } from './organizations/organizations.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { UsersModule } from './users/users.module';
 import { ComplianceModule } from './compliance/compliance.module';
+import { TelephonyModule } from './telephony/telephony.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { ComplianceModule } from './compliance/compliance.module';
     OrganizationsModule,
     UsersModule,
     ComplianceModule,
+    TelephonyModule,
   ],
   controllers: [AppController],
   providers: [AppService],

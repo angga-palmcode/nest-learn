@@ -1,5 +1,15 @@
 # Astos Backend — Project Reference
 
+## Progress
+
+| # | Module (FSD) | Status | Notes |
+|---|---|---|---|
+| 1 | Authentication & User Management | ✅ Done | JWT + refresh tokens, TOTP MFA, Email OTP MFA, sessions, invitations, password reset, user CRUD, org management |
+| 2 | Compliance Engine | ✅ Done | Consent, DNC, recording disclosures, audit trail + CSV export, `runComplianceChecks()` pipeline |
+| 3 | Telephony | ✅ Done | `Call` model, list/get/recording/transcript endpoints, Telnyx + Twilio adapters (stubs), provider failover, `placeCall()` internal method |
+
+---
+
 ## Stack
 
 - **Framework:** NestJS 11 + TypeScript
@@ -127,6 +137,17 @@ src/
 │       ├── create-disclosure.dto.ts
 │       ├── update-disclosure.dto.ts
 │       └── query-compliance-audit.dto.ts
+│
+├── telephony/                  Telephony module (Telnyx + Twilio)
+│   ├── telephony.module.ts
+│   ├── telephony.service.ts
+│   ├── telephony.controller.ts
+│   ├── providers/
+│   │   ├── telephony-provider.interface.ts  ITelephonyProvider interface
+│   │   ├── telnyx.adapter.ts               Telnyx adapter (stub)
+│   │   └── twilio.adapter.ts               Twilio adapter (stub — failover)
+│   └── dto/
+│       └── list-calls.dto.ts
 │
 └── prisma/
     ├── prisma.module.ts
@@ -282,6 +303,35 @@ prisma/
 | checked_at | TIMESTAMP | |
 | created_at | TIMESTAMP | immutable — no UPDATE/DELETE ever |
 
+### `Call`
+| Column | Type | Notes |
+|---|---|---|
+| id | UUID PK | auto |
+| org_id | UUID FK → Organization | |
+| campaign_id | VARCHAR(255) | FK to campaigns (future module) |
+| lead_id | VARCHAR(255) | FK to leads (future module) |
+| provider | ENUM(telnyx, twilio) | Which provider placed the call |
+| provider_call_id | VARCHAR(255) NULLABLE | Provider's call SID |
+| from_number | VARCHAR(20) | Caller ID (E.164) |
+| to_number | VARCHAR(20) | Lead phone (E.164) |
+| status | ENUM(queued, ringing, answered, completed, failed, no_answer, busy, voicemail, cancelled) | |
+| direction | ENUM(outbound) | Always outbound for Phase 1A |
+| started_at / ended_at | TIMESTAMP NULLABLE | |
+| duration_seconds | INT NULLABLE | |
+| recording_url | VARCHAR(500) NULLABLE | Cloud Storage URL |
+| recording_duration_seconds | INT NULLABLE | |
+| amd_result | ENUM(human, voicemail, unknown, not_checked) | default not_checked |
+| voicemail_action | ENUM(hung_up, left_message, retry_scheduled) NULLABLE | |
+| disconnect_reason | VARCHAR(255) NULLABLE | |
+| cost_amount / cost_currency | DECIMAL(10,4) / VARCHAR(3) | default SEK |
+| intent_result | ENUM(interested, not_interested, callback_requested, dnc_requested, undetermined) NULLABLE | AI-classified |
+| sentiment_score | DECIMAL(3,2) NULLABLE | -1.00 to +1.00 |
+| transcript_url | VARCHAR(500) NULLABLE | Cloud Storage URL |
+| compliance_result | ENUM(passed, blocked) | |
+| compliance_block_reason | VARCHAR(100) NULLABLE | NO_CONSENT / DNC_BLOCKED / OUTSIDE_CALLING_WINDOW |
+| metadata | JSON NULLABLE | |
+| created_at / updated_at | TIMESTAMP | |
+
 ### `RecordingDisclosure`
 | Column | Type | Notes |
 |---|---|---|
@@ -359,6 +409,15 @@ prisma/
 | PUT | `/compliance/disclosures/:id` | admin, manager | partial disclosure fields | Update disclosure |
 | GET | `/compliance/audit` | admin | `?call_id=&lead_id=&check_type=&status=&date_from=&date_to=&sort=&page=&page_size=` | Query compliance audit trail |
 | GET | `/compliance/audit/export` | admin | same filters as audit | Download audit as CSV |
+
+### Calls (`/calls`) — all require JWT
+
+| Method | Path | Role | Body / Query | Description |
+|--------|------|------|-------------|-------------|
+| GET | `/calls` | admin, manager | `?campaign_id=&lead_id=&status=&intent_result=&date_from=&date_to=&sort=&include=&page=&page_size=` | List calls with filters + pagination |
+| GET | `/calls/:id` | admin, manager | — | Get call details + compliance checks |
+| GET | `/calls/:id/recording` | admin, manager | — | Get pre-signed recording URL (expires 1h) |
+| GET | `/calls/:id/transcript` | admin, manager | — | Get call transcript |
 
 ---
 
@@ -524,3 +583,8 @@ req.user  // → { userId, orgId, role }
 - **`session_id`** — now returned in the response body of all login endpoints (normal login, TOTP challenge, email OTP challenge, recovery, accept-invite). Frontend should store it and send as `X-Session-ID` header for session listing and targeted revocation.
 - **MailService is console-only** — no SMTP configured yet. All emails are logged via `Logger`. Check the console for verification URLs / reset links during development.
 - **`start:prod` script** points to `dist/main` but compiled output is in `dist/src/main.js`. Use `node dist/src/main.js` directly.
+- **Telephony providers are stubs** — `TelnyxAdapter` and `TwilioAdapter` throw `Error('not yet implemented')` on every method. Wire up real SDKs (`telnyx`, `twilio` npm packages) when integrating.
+- **Telephony failover** — `placeCall()` tries Telnyx first; on any thrown error, retries via Twilio. If both fail, saves a `failed` Call record. All failures logged via `Logger`.
+- **`GET /calls/:id/recording`** — returns `recording_url` directly (no real pre-signed URL yet). Replace with GCS/S3 signed URL when Cloud Storage is configured.
+- **`GET /calls/:id/transcript`** — returns `transcript_url` only (no JSON fetch). Replace with actual fetch + parse from Cloud Storage.
+- **`placeCall()` is internal** — not exposed as an HTTP route. Will be called by the Campaign Dialer module. Requires `callingWindowStart`, `callingWindowEnd`, and `timezone` from campaign config.

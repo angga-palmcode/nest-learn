@@ -800,3 +800,462 @@ public function update(User $authUser, Campaign $campaign): bool
 | AC-AUTH-15 | Org-enforced MFA requires MFA for all users | Enable org MFA → user without MFA setup is prompted to set it up on next login |
 
 ---
+
+## 2. MODULE: Compliance Engine
+
+**PRD References:** CMP-001, CMP-003, CMP-004, CMP-005, CMP-006
+**Priority:** CRITICAL
+**Owner:** Backend (Laravel) + AI Services (Python)
+
+### 2.1 Overview
+
+The Compliance Engine is the gatekeeper for every outbound call. **No call can be placed without passing through the compliance pipeline.** The engine enforces consent verification, DNC checking, recording disclosure, opt-out processing, and audit logging. These checks are mandatory and cannot be disabled or bypassed by any user role.
+
+The compliance pipeline executes in this exact order before every call:
+
+```
+Lead selected for dialing
+    → Step 1: Verify consent exists and is valid
+    → Step 2: Check phone number against DNC registry
+    → Step 3: Verify calling window (timezone-aware)
+    → Step 4: All checks pass → Place call
+    → Step 5: Call connected → Play recording disclosure
+    → Step 6: During call → Monitor for opt-out phrases
+    → Step 7: Call ends → Log complete audit trail
+```
+
+If ANY step fails, the call is **blocked** and the reason is logged.
+
+### 2.2 Data Models
+
+#### Table: `consent_records`
+
+| Column | Type | Constraints | Description |
+|---|---|---|---|
+| `id` | UUID | PK | |
+| `org_id` | UUID | FK → organizations.id, NOT NULL | |
+| `lead_id` | UUID | FK → leads.id, NOT NULL | |
+| `consent_type` | ENUM('prior_express', 'prior_express_written', 'implied') | NOT NULL | Type of consent obtained |
+| `consent_source` | VARCHAR(255) | NOT NULL | Where consent was obtained (e.g., 'web_form', 'verbal_recording', 'contract_signed') |
+| `consent_text` | TEXT | NULLABLE | Exact consent language the lead agreed to |
+| `consented_at` | TIMESTAMP | NOT NULL | When the lead gave consent |
+| `expires_at` | TIMESTAMP | NULLABLE | Consent expiration (NULL = no expiry) |
+| `revoked_at` | TIMESTAMP | NULLABLE | If consent was revoked |
+| `revoked_reason` | VARCHAR(255) | NULLABLE | Reason for revocation |
+| `metadata` | JSON | NULLABLE | Additional context (IP, form URL, recording ID, etc.) |
+| `created_at` | TIMESTAMP | NOT NULL | |
+| `updated_at` | TIMESTAMP | NOT NULL | |
+
+#### Table: `dnc_registry`
+
+| Column | Type | Constraints | Description |
+|---|---|---|---|
+| `id` | UUID | PK | |
+| `phone_number` | VARCHAR(20) | NOT NULL, INDEXED | E.164 format |
+| `source` | ENUM('national_registry', 'internal_optout', 'manual') | NOT NULL | How the number got on the DNC list |
+| `reason` | VARCHAR(255) | NULLABLE | Why the number is on DNC |
+| `added_at` | TIMESTAMP | NOT NULL | When the number was added |
+| `lead_id` | UUID | FK → leads.id, NULLABLE | If tied to a specific lead |
+| `org_id` | UUID | NULLABLE | NULL = national registry (global), set = org-specific opt-out |
+| `call_id` | UUID | FK → calls.id, NULLABLE | If added due to an opt-out during a call |
+| `created_at` | TIMESTAMP | NOT NULL | |
+
+**Index:** Composite index on (`phone_number`, `org_id`) for fast lookup.
+
+#### Table: `compliance_checks`
+
+| Column | Type | Constraints | Description |
+|---|---|---|---|
+| `id` | UUID | PK | |
+| `org_id` | UUID | FK → organizations.id, NOT NULL | |
+| `call_id` | UUID | FK → calls.id, NULLABLE | NULL if call was blocked before placement |
+| `lead_id` | UUID | FK → leads.id, NOT NULL | |
+| `check_type` | ENUM('consent', 'dnc', 'calling_window', 'recording_disclosure', 'optout_detection') | NOT NULL | |
+| `status` | ENUM('passed', 'failed', 'skipped') | NOT NULL | |
+| `details` | JSON | NOT NULL | Full details of the check (see below) |
+| `checked_at` | TIMESTAMP | NOT NULL | |
+| `created_at` | TIMESTAMP | NOT NULL | |
+
+**`details` JSON structure by check_type:**
+
+For `consent`:
+```json
+{
+  "consent_record_id": "uuid",
+  "consent_type": "prior_express",
+  "consented_at": "2026-01-15T10:00:00Z",
+  "expired": false
+}
+```
+
+For `dnc`:
+```json
+{
+  "phone_number": "+46701234567",
+  "checked_against": ["national_registry", "internal_optout"],
+  "found_on_dnc": false,
+  "registry_last_updated": "2026-03-01T00:00:00Z"
+}
+```
+
+For `optout_detection`:
+```json
+{
+  "detected_phrase": "stop calling me",
+  "detected_language": "en",
+  "timestamp_in_call": 45.2,
+  "action_taken": "flagged_dnc_and_ended_contact",
+  "new_dnc_record_id": "uuid"
+}
+```
+
+#### Table: `recording_disclosures`
+
+| Column | Type | Constraints | Description |
+|---|---|---|---|
+| `id` | UUID | PK | |
+| `org_id` | UUID | FK → organizations.id, NOT NULL | |
+| `name` | VARCHAR(255) | NOT NULL | Disclosure name (e.g., "Swedish Default", "English Financial") |
+| `language` | VARCHAR(10) | NOT NULL | Language code (sv, en) |
+| `text` | TEXT | NOT NULL | Full disclosure text |
+| `audio_url` | VARCHAR(500) | NOT NULL | URL to pre-recorded audio file in Cloud Storage |
+| `duration_ms` | INTEGER | NOT NULL | Audio duration in milliseconds |
+| `jurisdiction` | VARCHAR(50) | NOT NULL | Jurisdiction this applies to (e.g., 'SE', 'NO') |
+| `is_default` | BOOLEAN | DEFAULT false | Default for this org + jurisdiction |
+| `created_at` | TIMESTAMP | NOT NULL | |
+| `updated_at` | TIMESTAMP | NOT NULL | |
+
+### 2.3 API Endpoints
+
+#### 2.3.1 Consent Management
+
+**POST `/api/compliance/consent`** — Record consent for a lead.
+**Authentication:** Required. Role: `admin`, `manager`.
+
+**Request:**
+```json
+{
+  "lead_id": "uuid",
+  "consent_type": "prior_express",
+  "consent_source": "web_form",
+  "consent_text": "I agree to be contacted by phone regarding my account.",
+  "consented_at": "2026-02-15T10:00:00Z",
+  "expires_at": null
+}
+```
+
+**GET `/api/compliance/consent/{lead_id}`** — Get consent history for a lead.
+**Authentication:** Required. Role: `admin`, `manager`.
+
+#### 2.3.2 DNC Management
+
+**GET `/api/compliance/dnc/check/{phone_number}`** — Check if a number is on DNC.
+**Authentication:** Required.
+
+**Response:**
+```json
+{
+  "data": {
+    "phone_number": "+46701234567",
+    "is_blocked": true,
+    "sources": [
+      {
+        "source": "national_registry",
+        "added_at": "2026-01-10T00:00:00Z",
+        "reason": "National DNC registration"
+      }
+    ]
+  }
+}
+```
+
+**POST `/api/compliance/dnc`** — Manually add a number to DNC.
+**Authentication:** Required. Role: `admin`, `manager`.
+
+**POST `/api/compliance/dnc/sync`** — Trigger DNC registry sync from national provider.
+**Authentication:** Required. Role: `admin`.
+
+#### 2.3.3 Recording Disclosures
+
+**GET `/api/compliance/disclosures`** — List all recording disclosures for the org.
+**POST `/api/compliance/disclosures`** — Create a new disclosure.
+**PUT `/api/compliance/disclosures/{id}`** — Update a disclosure.
+
+#### 2.3.4 Audit Trail
+
+**GET `/api/compliance/audit`** — Query audit trail.
+**Authentication:** Required. Role: `admin`.
+
+**Query params (Spatie Query Builder):**
+```
+?filter[call_id]=uuid
+&filter[lead_id]=uuid
+&filter[check_type]=consent,dnc
+&filter[status]=passed,failed
+&filter[date_from]=2026-03-01
+&filter[date_to]=2026-03-03
+&sort=-created_at
+&page[number]=1
+&page[size]=50
+```
+**Allowed filters:** `call_id` (exact), `lead_id` (exact), `check_type` (exact, comma-separated for multiple), `status` (exact, comma-separated), `date_from` (scope — `>=`), `date_to` (scope — `<=`).
+**Allowed sorts:** `created_at`, `check_type`, `status`.
+
+**Response:**
+```json
+{
+  "data": [
+    {
+      "id": "uuid",
+      "call_id": "uuid",
+      "lead_id": "uuid",
+      "check_type": "consent",
+      "status": "passed",
+      "details": { "..." },
+      "checked_at": "2026-03-03T14:30:00Z"
+    }
+  ],
+  "meta": { "current_page": 1, "page_size": 50, "total": 150, "last_page": 3 }
+}
+```
+
+**GET `/api/compliance/audit/export`** — Export audit trail as CSV.
+**Authentication:** Required. Role: `admin`.
+**Query params:** Same Spatie filters as above.
+**Response:** Returns a download URL for a CSV file generated asynchronously.
+
+### 2.4 Compliance Pipeline (Internal Service)
+
+This is the internal service logic that runs before every call. It is NOT a public API — it is invoked by the Campaign Dialer service.
+
+```python
+# Pseudocode for compliance pipeline
+def run_compliance_checks(lead: Lead, campaign: Campaign, org: Organization) -> ComplianceResult:
+    checks = []
+
+    # Step 1: Consent verification
+    consent = get_valid_consent(lead.id, org.id)
+    if not consent:
+        checks.append(ComplianceCheck(type='consent', status='failed', details={...}))
+        return ComplianceResult(allowed=False, checks=checks, block_reason='NO_CONSENT')
+    checks.append(ComplianceCheck(type='consent', status='passed', details={...}))
+
+    # Step 2: DNC check
+    dnc_hit = check_dnc(lead.phone_number, org.id)
+    if dnc_hit:
+        checks.append(ComplianceCheck(type='dnc', status='failed', details={...}))
+        return ComplianceResult(allowed=False, checks=checks, block_reason='DNC_BLOCKED')
+    checks.append(ComplianceCheck(type='dnc', status='passed', details={...}))
+
+    # Step 3: Calling window check
+    now_in_lead_tz = convert_to_timezone(utc_now(), lead.timezone or org.timezone)
+    if not is_within_calling_window(now_in_lead_tz, campaign.schedule):
+        checks.append(ComplianceCheck(type='calling_window', status='failed', details={...}))
+        return ComplianceResult(allowed=False, checks=checks, block_reason='OUTSIDE_CALLING_WINDOW')
+    checks.append(ComplianceCheck(type='calling_window', status='passed', details={...}))
+
+    # All checks passed
+    return ComplianceResult(allowed=True, checks=checks, block_reason=None)
+```
+
+### 2.5 Real-Time Opt-Out Detection (AI Service)
+
+The Python AI service monitors every active call for opt-out phrases in real-time.
+
+**Opt-out phrases (configurable per org, default set):**
+
+Swedish: `"sluta ringa"`, `"ring inte mer"`, `"avregistrera"`, `"ta bort mig"`, `"jag vill inte bli kontaktad"`, `"stoppa"`, `"nej tack, ring inte igen"`
+
+English: `"stop"`, `"stop calling"`, `"unsubscribe"`, `"remove me"`, `"do not call"`, `"take me off your list"`, `"I don't want to be called"`, `"don't call again"`
+
+**Detection flow:**
+1. STT transcription runs in real-time during call.
+2. Each transcription segment is checked against opt-out phrases (fuzzy matching, case-insensitive).
+3. On match → immediately:
+   a. Flag lead status as `dnc` in leads table.
+   b. Create `dnc_registry` entry with source `internal_optout`.
+   c. Create `compliance_checks` entry with type `optout_detection`.
+   d. Signal the AI conversation engine to acknowledge the opt-out politely and end the call.
+   e. The AI says: "I understand. I've noted your request and we will not contact you again. Thank you for your time. Goodbye."
+4. Total time from phrase detection to system response: **< 2 seconds**.
+
+### 2.6 Acceptance Criteria
+
+| ID | Criterion | How to Verify |
+|---|---|---|
+| AC-CMP-01 | A call cannot be placed for a lead without a valid consent record | Attempt to dial lead with no consent → call blocked with reason logged |
+| AC-CMP-02 | A call cannot be placed to a number on the DNC registry | Add number to DNC → attempt dial → blocked |
+| AC-CMP-03 | A call cannot be placed outside the configured calling window | Configure window 09:00–17:00 → attempt dial at 20:00 → blocked |
+| AC-CMP-04 | Recording disclosure plays before AI conversation begins | Listen to call recording → disclosure is first audio heard |
+| AC-CMP-05 | Saying "stop calling" during a call triggers immediate opt-out | Say phrase → lead flagged DNC + call gracefully ended within 2s |
+| AC-CMP-06 | Every call has a complete audit trail with all compliance checks | Query audit for any call → all 5 check types present |
+| AC-CMP-07 | Audit trail records are immutable (no UPDATE or DELETE possible) | Attempt to modify audit record via API → fails |
+| AC-CMP-08 | Audit export produces valid CSV with all required fields | Export → open CSV → verify all columns present |
+| AC-CMP-09 | DNC sync updates the registry from national provider | Trigger sync → verify new entries appear |
+| AC-CMP-10 | Opt-out phrases work in both Swedish and English | Test both language sets → all trigger correctly |
+
+---
+
+## 3. MODULE: Telephony
+
+**PRD References:** TEL-001 through TEL-005
+**Priority:** CRITICAL
+**Owner:** Backend (NestJS) + AI Services (Python)
+
+### 3.1 Overview
+
+The telephony module handles the physical act of placing, managing, and recording outbound calls. It uses **Telnyx** as the primary provider and **Twilio** as failover. The system abstracts telephony providers behind a unified interface so switching or failover is transparent.
+
+### 3.2 Data Models
+
+#### Table: `calls`
+
+| Column | Type | Constraints | Description |
+|---|---|---|---|
+| `id` | UUID | PK | |
+| `org_id` | UUID | FK → organizations.id, NOT NULL | |
+| `campaign_id` | VARCHAR(255) | NOT NULL | FK to campaigns (future module) |
+| `lead_id` | VARCHAR(255) | NOT NULL | FK to leads (future module) |
+| `provider` | ENUM('telnyx', 'twilio') | NOT NULL | Which telephony provider was used |
+| `provider_call_id` | VARCHAR(255) | NULLABLE | Provider's call SID/ID |
+| `from_number` | VARCHAR(20) | NOT NULL | Caller ID (E.164) |
+| `to_number` | VARCHAR(20) | NOT NULL | Lead phone (E.164) |
+| `status` | ENUM('queued', 'ringing', 'answered', 'completed', 'failed', 'no_answer', 'busy', 'voicemail', 'cancelled') | NOT NULL | Current call state |
+| `direction` | ENUM('outbound') | NOT NULL | Always outbound for Phase 1A |
+| `started_at` | TIMESTAMP | NULLABLE | When call was answered |
+| `ended_at` | TIMESTAMP | NULLABLE | When call ended |
+| `duration_seconds` | INTEGER | NULLABLE | Call duration (answered to end) |
+| `recording_url` | VARCHAR(500) | NULLABLE | Cloud Storage URL for recording |
+| `recording_duration_seconds` | INTEGER | NULLABLE | Recording length |
+| `amd_result` | ENUM('human', 'voicemail', 'unknown', 'not_checked') | DEFAULT 'not_checked' | Answering machine detection result |
+| `voicemail_action` | ENUM('hung_up', 'left_message', 'retry_scheduled') | NULLABLE | What happened when voicemail detected |
+| `disconnect_reason` | VARCHAR(255) | NULLABLE | Why call ended |
+| `cost_amount` | DECIMAL(10,4) | NULLABLE | Call cost in SEK |
+| `cost_currency` | VARCHAR(3) | DEFAULT 'SEK' | |
+| `intent_result` | ENUM('interested', 'not_interested', 'callback_requested', 'dnc_requested', 'undetermined') | NULLABLE | AI-classified outcome |
+| `sentiment_score` | DECIMAL(3,2) | NULLABLE | -1.00 to +1.00 |
+| `transcript_url` | VARCHAR(500) | NULLABLE | Cloud Storage URL for transcript JSON |
+| `compliance_result` | ENUM('passed', 'blocked') | NOT NULL | Whether compliance checks passed |
+| `compliance_block_reason` | VARCHAR(100) | NULLABLE | If blocked: NO_CONSENT, DNC_BLOCKED, OUTSIDE_CALLING_WINDOW |
+| `metadata` | JSON | NULLABLE | Additional provider-specific data |
+| `created_at` | TIMESTAMP | NOT NULL | |
+| `updated_at` | TIMESTAMP | NOT NULL | |
+
+**Indexes:** `(org_id, status)`, `(org_id, campaign_id)`, `(org_id, lead_id)`
+
+### 3.3 Telephony Provider Abstraction
+
+```typescript
+// Interface that both Telnyx and Twilio adapters implement
+interface ITelephonyProvider {
+  placeCall(from: string, to: string, options: Record<string, any>): Promise<CallResult>;
+  hangUp(providerCallId: string): Promise<void>;
+  getCallStatus(providerCallId: string): Promise<ProviderCallStatus>;
+  startRecording(providerCallId: string): Promise<string>; // returns recording ID
+  stopRecording(providerCallId: string): Promise<void>;
+  playAudio(providerCallId: string, audioUrl: string): Promise<void>;
+  sendDTMF(providerCallId: string, digits: string): Promise<void>;
+  transferCall(providerCallId: string, toNumber: string): Promise<void>;
+}
+```
+
+**Failover logic:**
+1. Attempt call via Telnyx.
+2. If Telnyx throws an error → retry via Twilio.
+3. If Twilio also fails → mark call as `failed`, log both errors.
+4. All failover events logged with provider, error details, and timestamps.
+
+### 3.4 Call Lifecycle
+
+```
+1. Campaign dialer selects lead
+2. Compliance pipeline runs → PASS or BLOCK
+3. If PASS → Telephony places call via provider
+4. Call state: QUEUED → RINGING
+5. Provider reports call answered → state: ANSWERED
+   OR no answer after 30s → state: NO_ANSWER
+   OR busy signal → state: BUSY
+6. If ANSWERED → AMD runs (< 3s detection)
+   a. If VOICEMAIL → execute voicemail_action (hang up / leave message / schedule retry)
+   b. If HUMAN → start recording → play disclosure → hand off to AI conversation engine
+7. AI conversation runs (see Module 4)
+8. Call ends → state: COMPLETED
+9. Post-call processing:
+   a. Save recording to Cloud Storage
+   b. Generate transcript
+   c. Classify intent
+   d. Update lead status
+   e. Log audit trail
+   f. Fire webhooks
+```
+
+### 3.5 API Endpoints
+
+**GET `/api/calls`** — List calls with filters.
+**Authentication:** Required. Role: `admin`, `manager`.
+
+**Query params:**
+```
+?campaign_id=uuid
+&lead_id=uuid
+&status=completed,answered
+&intent_result=interested,callback_requested
+&date_from=2026-03-01
+&date_to=2026-03-31
+&sort=-started_at
+&include=complianceChecks
+&page=1
+&page_size=50
+```
+**Allowed filters:** `campaign_id` (exact), `lead_id` (exact), `status` (comma-separated), `intent_result` (comma-separated), `date_from` (`>=`), `date_to` (`<=`).
+**Allowed sorts:** `started_at`, `ended_at`, `duration_seconds`, `status`, `intent_result`.
+**Allowed includes:** `complianceChecks`.
+
+**GET `/api/calls/{id}`** — Get call details including compliance checks.
+**Authentication:** Required. Role: `admin`, `manager`.
+
+**GET `/api/calls/{id}/recording`** — Get a pre-signed URL for call recording playback (expires in 1 hour).
+**Authentication:** Required. Role: `admin`, `manager`.
+
+**Response:**
+```json
+{ "url": "https://...", "expires_at": "2026-03-31T10:00:00Z" }
+```
+
+**GET `/api/calls/{id}/transcript`** — Get call transcript metadata.
+**Authentication:** Required. Role: `admin`, `manager`.
+
+**Response:**
+```json
+{
+  "call_id": "uuid",
+  "transcript_url": "https://...",
+  "duration_seconds": 120
+}
+```
+
+### 3.6 Webhook Events
+
+The telephony module publishes webhook events to client systems (see Module 8 for webhook delivery):
+
+| Event | Trigger | Payload Includes |
+|---|---|---|
+| `call.started` | Call answered by human | call_id, campaign_id, lead_id, from, to, started_at |
+| `call.completed` | Call ended | call_id, duration, status, intent_result, recording_url |
+| `call.failed` | Call could not connect | call_id, failure_reason, provider |
+| `call.voicemail` | Voicemail detected | call_id, amd_result, voicemail_action |
+| `call.optout` | Opt-out detected during call | call_id, lead_id, detected_phrase |
+
+### 3.7 Acceptance Criteria
+
+| ID | Criterion | How to Verify |
+|---|---|---|
+| AC-TEL-01 | Calls are placed via Telnyx and call state transitions are tracked | Place call → verify status changes from queued → ringing → answered → completed |
+| AC-TEL-02 | If Telnyx fails, system automatically falls back to Twilio | Simulate Telnyx failure → call placed via Twilio |
+| AC-TEL-03 | Caller ID is configurable per campaign | Set different caller IDs on 2 campaigns → verify each uses correct ID |
+| AC-TEL-04 | AMD correctly detects voicemail vs human | Call voicemail number → verify AMD result = voicemail; call human → AMD = human |
+| AC-TEL-05 | All calls are recorded and recordings are playable | Complete call → get recording URL → play back → audio is complete |
+| AC-TEL-06 | Call setup time is < 3 seconds (dial to ringing) | Measure time from API call to first ring event → < 3s |
+| AC-TEL-07 | Webhook events fire for all call state changes | Set up webhook listener → place call → verify all events received |
+
+---

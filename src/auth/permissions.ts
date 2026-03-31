@@ -26,4 +26,8 @@ export const PERMISSIONS = {
   COMPLIANCE_DISCLOSURES_WRITE: ['admin', 'manager'] as const,
   COMPLIANCE_AUDIT_READ:        ['admin'] as const,
   COMPLIANCE_AUDIT_EXPORT:      ['admin'] as const,
+
+  // ─── Telephony ────────────────────────────────────────────────────────────
+  CALLS_READ:      ['admin', 'manager'] as const,
+  CALLS_RECORDING: ['admin', 'manager'] as const,
 } as const;

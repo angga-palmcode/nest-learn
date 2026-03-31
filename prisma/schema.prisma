@@ -27,6 +27,7 @@ model Organization {
   dncEntries           DncRegistry[]
   complianceChecks     ComplianceCheck[]
   recordingDisclosures RecordingDisclosure[]
+  calls                Call[]
 }
 
 enum UserRole {
@@ -221,4 +222,89 @@ model RecordingDisclosure {
   is_default   Boolean      @default(false)
   created_at   DateTime     @default(now())
   updated_at   DateTime     @updatedAt
+}
+
+// ─── Telephony ────────────────────────────────────────────────────────────────
+
+enum CallProvider {
+  telnyx
+  twilio
+}
+
+enum CallStatus {
+  queued
+  ringing
+  answered
+  completed
+  failed
+  no_answer
+  busy
+  voicemail
+  cancelled
+}
+
+enum CallDirection {
+  outbound
+}
+
+enum AmdResult {
+  human
+  voicemail
+  unknown
+  not_checked
+}
+
+enum VoicemailAction {
+  hung_up
+  left_message
+  retry_scheduled
+}
+
+enum CallIntentResult {
+  interested
+  not_interested
+  callback_requested
+  dnc_requested
+  undetermined
+}
+
+enum CallComplianceResult {
+  passed
+  blocked
+}
+
+model Call {
+  id                         String               @id @default(uuid())
+  org_id                     String
+  org                        Organization         @relation(fields: [org_id], references: [id])
+  campaign_id                String               @db.VarChar(255)
+  lead_id                    String               @db.VarChar(255)
+  provider                   CallProvider
+  provider_call_id           String?              @db.VarChar(255)
+  from_number                String               @db.VarChar(20)
+  to_number                  String               @db.VarChar(20)
+  status                     CallStatus
+  direction                  CallDirection        @default(outbound)
+  started_at                 DateTime?
+  ended_at                   DateTime?
+  duration_seconds           Int?
+  recording_url              String?              @db.VarChar(500)
+  recording_duration_seconds Int?
+  amd_result                 AmdResult            @default(not_checked)
+  voicemail_action           VoicemailAction?
+  disconnect_reason          String?              @db.VarChar(255)
+  cost_amount                Decimal?             @db.Decimal(10, 4)
+  cost_currency              String               @default("SEK") @db.VarChar(3)
+  intent_result              CallIntentResult?
+  sentiment_score            Decimal?             @db.Decimal(3, 2)
+  transcript_url             String?              @db.VarChar(500)
+  compliance_result          CallComplianceResult
+  compliance_block_reason    String?              @db.VarChar(100)
+  metadata                   Json?
+  created_at                 DateTime             @default(now())
+  updated_at                 DateTime             @updatedAt
+
+  @@index([org_id, status])
+  @@index([org_id, campaign_id])
+  @@index([org_id, lead_id])
 }
