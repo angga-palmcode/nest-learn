@@ -14,43 +14,46 @@ This FSD is the **definitive technical reference** for building Phase 1A of the 
 
 **This document is designed to be consumed by both human developers and AI coding agents.** Every specification is written to be unambiguous, self-contained, and implementable without requiring additional clarification. If a behavior is not specified here, it should not be built.
 
+> **NestJS Implementation Note:** The original FSD was authored for a Laravel/Spatie stack. The NestJS backend implements the same business logic but uses NestJS conventions where they differ. **The implemented code is the authoritative source of truth** — not the raw FSD text. Key divergences:
+> - **Pagination:** NestJS uses flat params (`?page=1&page_size=25`) — not Laravel's `page[number]=1&page[size]=25` bracket format (see Appendix C).
+> - **Endpoint prefix:** NestJS routes are served at `/` (e.g. `/auth/login`) — not `/api/` as specified in the Laravel section headers.
+> - **Auth tokens:** JWT access + opaque refresh tokens — not Laravel Sanctum `personal_access_tokens`.
+> - **Modules 6–10 and Appendices** were added during NestJS implementation and document NestJS behavior directly.
+
 ---
 
 ## Tech Stack Reference
 
-All implementations in this FSD use the following stack. AI agents and developers must use these technologies unless explicitly noted otherwise.
-
 | Layer | Technology | Version / Notes |
 |---|---|---|
 | Frontend | Next.js (React) | Latest stable. App Router. TypeScript required. |
-| Backend API | Laravel (PHP) | Latest stable (11.x+). RESTful JSON API only. |
-| Authentication | Laravel Sanctum | Stateless API token authentication (Bearer tokens). |
-| AI Services | Python (FastAPI) | Voice pipeline, STT/TTS orchestration, LLM engine. |
-| Database | PostgreSQL 15+ | Hosted on GCP Cloud SQL. Multi-AZ replication. |
-| Cache | Redis (GCP Memorystore) | Sessions, agent config, active call state. |
-| Message Queue | GCP Pub/Sub + Redis Streams | Real-time events + analytics pipeline. |
+| Backend API | **NestJS 11 (TypeScript)** | RESTful JSON API. Node.js 22 runtime. |
+| Authentication | **JWT + opaque refresh tokens** | Access token 15 min, refresh token 7 days. TOTP MFA + Email OTP MFA. |
+| AI Services | Python (FastAPI) | Voice pipeline, STT/TTS orchestration, LLM engine. Not in this repo. |
+| Database | PostgreSQL 15+ | Local dev: `nest-dev2` on `localhost:5432`. Production: GCP Cloud SQL. |
+| ORM | **Prisma 5** | Schema-first, migrations via `prisma migrate dev` / `db push`. |
+| Cache | Redis (GCP Memorystore) | Not yet integrated in NestJS — reserved for sessions and active call state. |
+| Message Queue | GCP Pub/Sub + Redis Streams | Not yet integrated — reserved for real-time events and analytics pipeline. |
 | Cloud | Google Cloud Platform (GCP) | GKE, Cloud SQL, Cloud Storage, Memorystore, Pub/Sub. |
-| Storage | GCP Cloud Storage | Call recordings, CSV uploads, exports. Lifecycle policies. |
-| CI/CD | GitHub Actions + Cloud Build | Blue-green deployment to GKE. >80% test coverage gate. |
-| Monitoring | Prometheus + Grafana | Metrics. Cloud Monitoring + Cloud Logging for GCP-native. OpenTelemetry + Jaeger for tracing. |
+| Storage | GCP Cloud Storage | Call recordings, CSV uploads, exports. Not yet integrated. |
+| CI/CD | GitHub Actions + Cloud Build | Blue-green deployment to GKE. |
+| Monitoring | Prometheus + Grafana | OpenTelemetry + Jaeger for tracing. Not yet integrated. |
 
 ### Coding Conventions
 
-- **API format:** All API responses use JSON. All endpoints are prefixed with `/api/` (no versioning).
-- **Query Builder:** All list/index endpoints use [Spatie Laravel Query Builder](https://spatie.be/docs/laravel-query-builder). Query parameters follow the JSON API specification:
-  - **Filtering:** `?filter[field]=value` — e.g., `?filter[status]=active&filter[role]=admin`
-  - **Sorting:** `?sort=field` (ascending) or `?sort=-field` (descending) — e.g., `?sort=-created_at,name`
-  - **Including relations:** `?include=relation1,relation2` — e.g., `?include=organization,sessions`
-  - **Sparse fields:** `?fields[resource]=field1,field2` — e.g., `?fields[users]=id,name,email`
-  - **Appends:** `?append=computed1,computed2` — for computed/accessor attributes
-  - **Pagination:** `?page[number]=1&page[size]=25` (JSON API spec)
-  - All allowed filters, sorts, includes, and fields must be explicitly declared using `allowedFilters()`, `allowedSorts()`, `allowedIncludes()`, and `allowedFields()` on the QueryBuilder instance. Any parameter not explicitly allowed is silently ignored (security by default).
+- **API format:** All API responses use JSON. Endpoints are served at root (e.g. `/auth/login`) — no `/api/` prefix.
+- **Query parameters:** All list/index endpoints use flat query params (NestJS/class-validator DTOs):
+  - **Filtering:** `?status=active&role=admin` — flat params, no bracket notation
+  - **Sorting:** `?sort=field` (ascending) or `?sort=-field` (descending) — e.g., `?sort=-created_at`
+  - **Including relations:** `?include=relation1,relation2` — e.g., `?include=leadStats`
+  - **Pagination:** `?page=1&page_size=25` — flat params (not bracket notation)
+  - All query params are validated and whitelisted by NestJS DTO classes using `class-validator`. Unknown params are rejected (`forbidNonWhitelisted: true`).
 - **Timestamps:** All timestamps are stored and returned in ISO 8601 UTC format (`2026-03-03T14:30:00Z`).
 - **UUIDs:** All primary keys use UUIDv4 (not auto-increment integers). This applies to all tables.
 - **Soft deletes:** All models use soft deletes (`deleted_at` column). No hard deletes except for GDPR right-to-deletion requests.
-- **Multi-tenancy:** Every database table that stores tenant data must include an `org_id` column. Every query must scope by `org_id`. Row-level security enforced at the database level.
-- **Validation:** All input validation happens at the Laravel API layer using Form Request classes. The frontend performs client-side validation for UX but never trusts it for security.
-- **Error format:** All API errors return a consistent JSON structure (see Section 2.10).
+- **Multi-tenancy:** Every database table that stores tenant data must include an `org_id` column. Every query must scope by `org_id`.
+- **Validation:** All input validation happens at the NestJS API layer using ValidationPipe + class-validator DTO classes. The frontend performs client-side validation for UX but never trusts it for security.
+- **Error format:** All API errors return a consistent JSON structure (see Appendix A).
 - **Language:** All code comments, variable names, API field names, and documentation are in English. User-facing UI text supports Swedish (primary) and English.
 
 ---
@@ -59,17 +62,17 @@ All implementations in this FSD use the following stack. AI agents and developer
 
 **PRD References:** AUTH-001 through AUTH-008, SEC-001, SEC-002
 **Priority:** CRITICAL
-**Owner:** Backend (Laravel) + Frontend (Next.js)
+**Owner:** Backend (NestJS) + Frontend (Next.js)
 
 ### 1.1 Overview
 
-Authentication is the first system a user interacts with. It controls access to every other module. The system uses **Laravel Sanctum in stateless API token mode**. The Next.js frontend communicates with the Laravel API exclusively via authenticated API calls using Bearer tokens.
+Authentication is the first system a user interacts with. It controls access to every other module. The system uses **JWT access tokens + opaque refresh tokens**. The Next.js frontend communicates with the NestJS API exclusively via authenticated API calls using Bearer tokens.
 
-**Authentication mode: Stateless API Tokens (Bearer tokens only).**
-- On successful login, the API issues a plaintext token. The frontend stores it securely (e.g., in memory or a secure cookie managed by the frontend).
-- Every API request includes the token in the `Authorization: Bearer {token}` header.
-- No server-side session state. No CSRF tokens needed. No cookie-based auth.
-- Tokens are validated on every request by hashing the provided token and matching against the `personal_access_tokens` table.
+**Authentication mode: JWT + Opaque Refresh Tokens.**
+- On successful login, the API issues a short-lived JWT access token (15 min) and a long-lived opaque refresh token (7 days). The frontend stores the refresh token securely and uses it to obtain new access tokens.
+- Every API request includes the JWT in the `Authorization: Bearer {token}` header.
+- No server-side session state for JWT validation. Sessions (`user_sessions`) are tracked separately for device/session management.
+- Access tokens are validated on every request by verifying the JWT signature. Refresh tokens are validated by lookup in the `refresh_tokens` table.
 - This approach enables full API portability — the same token works from the Next.js frontend, mobile apps, or third-party integrations.
 
 ### 1.2 Data Models
@@ -107,26 +110,44 @@ Authentication is the first system a user interacts with. It controls access to 
 | `last_login_at` | TIMESTAMP | NULLABLE | Last successful login |
 | `last_login_ip` | VARCHAR(45) | NULLABLE | Last login IP (IPv4 or IPv6) |
 | `is_active` | BOOLEAN | DEFAULT true | Deactivated users cannot log in |
+| `failed_login_attempts` | INTEGER | DEFAULT 0 | Reset on successful login |
+| `locked_until` | TIMESTAMP | NULLABLE | Set to now+15min after 5 failed attempts |
 | `invited_by` | UUID | FK → users.id, NULLABLE | Who invited this user |
 | `invited_at` | TIMESTAMP | NULLABLE | When invitation was sent |
 | `created_at` | TIMESTAMP | NOT NULL | |
 | `updated_at` | TIMESTAMP | NOT NULL | |
 | `deleted_at` | TIMESTAMP | NULLABLE | Soft delete |
 
-#### Table: `personal_access_tokens` (Sanctum default)
+#### Table: `refresh_tokens`
 
 | Column | Type | Constraints | Description |
 |---|---|---|---|
-| `id` | BIGINT | PK, AUTO_INCREMENT | Token ID |
-| `tokenable_type` | VARCHAR(255) | NOT NULL | Polymorphic type (App\Models\User) |
-| `tokenable_id` | UUID | NOT NULL | User ID |
-| `name` | VARCHAR(255) | NOT NULL | Token name (e.g., 'web-session', 'api-key') |
-| `token` | VARCHAR(64) | UNIQUE, NOT NULL | SHA-256 hash of the token |
-| `abilities` | JSON | NULLABLE | Token abilities/scopes |
-| `last_used_at` | TIMESTAMP | NULLABLE | |
-| `expires_at` | TIMESTAMP | NULLABLE | Token expiration |
+| `id` | UUID | PK | |
+| `token` | STRING | UNIQUE, NOT NULL | Opaque 128-char hex; stored plain |
+| `user_id` | UUID | FK → users.id, NOT NULL | |
+| `expires_at` | TIMESTAMP | NOT NULL | 7 days from creation |
 | `created_at` | TIMESTAMP | NOT NULL | |
-| `updated_at` | TIMESTAMP | NOT NULL | |
+| `revoked_at` | TIMESTAMP | NULLABLE | Set on logout or token rotation |
+
+#### Table: `mfa_email_tokens`
+
+| Column | Type | Constraints | Description |
+|---|---|---|---|
+| `id` | UUID | PK | |
+| `user_id` | UUID | FK → users.id, NOT NULL | |
+| `code_hash` | STRING | NOT NULL | SHA-256 of the 6-digit OTP |
+| `expires_at` | TIMESTAMP | NOT NULL | 5 min from creation |
+| `created_at` | TIMESTAMP | NOT NULL | |
+
+#### Table: `password_reset_tokens`
+
+| Column | Type | Constraints | Description |
+|---|---|---|---|
+| `id` | UUID | PK | |
+| `email` | VARCHAR(255) | NOT NULL | |
+| `token` | VARCHAR(64) | UNIQUE, NOT NULL | 32-byte random hex |
+| `expires_at` | TIMESTAMP | NOT NULL | 1 hour from creation |
+| `created_at` | TIMESTAMP | NOT NULL | |
 
 #### Table: `user_sessions`
 
@@ -171,7 +192,7 @@ Authentication is the first system a user interacts with. It controls access to 
 
 ### 1.3 API Endpoints
 
-#### 1.3.1 POST `/api/auth/register`
+#### 1.3.1 POST `/auth/register`
 
 **Purpose:** Create a new user account and organization.
 **Authentication:** None (public endpoint).
@@ -236,7 +257,7 @@ Authentication is the first system a user interacts with. It controls access to 
 
 ---
 
-#### 1.3.2 POST `/api/auth/login`
+#### 1.3.2 POST `/auth/login`
 
 **Purpose:** Authenticate a user and issue a session.
 **Authentication:** None (public endpoint).
@@ -262,30 +283,28 @@ Authentication is the first system a user interacts with. It controls access to 
 1. Look up user by email. If not found → 401.
 2. Check `is_active`. If false → 403 with message "Your account has been deactivated."
 3. Check `email_verified_at`. If NULL → 403 with message "Please verify your email before logging in."
-4. Verify password using `Hash::check()`. If wrong → increment fail counter → 401.
-5. If fail counter >= 5 within 15 minutes → 429 with lockout message + send lockout notification email.
-6. If `organizations.mfa_enforced` is true OR `users.mfa_enabled` is true → return 200 with `mfa_required: true` (do NOT issue token yet).
-7. If MFA not required → issue Sanctum token, create `user_sessions` record, update `last_login_at` and `last_login_ip`.
+4. Verify password using bcrypt compare. If wrong → increment `failed_login_attempts` → 401.
+5. If `failed_login_attempts` >= 5 → set `locked_until = now + 15min` → 429 with lockout message + send lockout notification email.
+6. If `organizations.mfa_enforced` is true OR `users.mfa_enabled` is true → return 200 with `mfa_required: true` and short-lived `mfa_token` JWT (5 min, type: `mfa_pending`). Do NOT issue access/refresh tokens yet.
+7. If MFA not required → issue JWT access token (15 min) + opaque refresh token (7 days), create `user_sessions` record, update `last_login_at` and `last_login_ip`.
 
 **Success response — no MFA (200 OK):**
 ```json
 {
-  "data": {
-    "token": "1|abc123def456...",
-    "token_type": "Bearer",
-    "expires_at": "2026-03-04T14:30:00Z",
-    "user": {
+  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "refresh_token": "a1b2c3d4e5f6...",
+  "session_id": "uuid-here",
+  "user": {
+    "id": "uuid-here",
+    "name": "Erik Johansson",
+    "email": "erik@company.se",
+    "role": "admin",
+    "mfa_enabled": false,
+    "organization": {
       "id": "uuid-here",
-      "name": "Erik Johansson",
-      "email": "erik@company.se",
-      "role": "admin",
-      "mfa_enabled": false,
-      "organization": {
-        "id": "uuid-here",
-        "name": "Stockholm Collections AB",
-        "slug": "stockholm-collections-ab",
-        "mfa_enforced": false
-      }
+      "name": "Stockholm Collections AB",
+      "slug": "stockholm-collections-ab",
+      "mfa_enforced": false
     }
   }
 }
@@ -294,14 +313,13 @@ Authentication is the first system a user interacts with. It controls access to 
 **Success response — MFA required (200 OK):**
 ```json
 {
-  "data": {
-    "mfa_required": true,
-    "mfa_token": "temporary-mfa-token-uuid",
-    "mfa_methods": ["totp", "email"],
-    "message": "Multi-factor authentication required."
-  }
+  "mfa_required": true,
+  "mfa_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "mfa_method": "totp"
 }
 ```
+
+> `mfa_method` is `"totp"` when user has TOTP enabled; `"email"` when org enforces MFA but user has no TOTP configured (email OTP fallback). Frontend uses this to decide which challenge screen to show.
 
 **Error responses:**
 | Status | Condition | Body |
@@ -313,50 +331,61 @@ Authentication is the first system a user interacts with. It controls access to 
 
 ---
 
-#### 1.3.3 POST `/api/auth/mfa/verify`
+#### 1.3.3 MFA Challenge Endpoints
 
-**Purpose:** Verify MFA code after login.
+**POST `/auth/mfa/challenge`** — TOTP MFA step 2.
 **Authentication:** Requires `mfa_token` from login response.
-**Rate limit:** 5 attempts per mfa_token.
 
 **Request body:**
 ```json
 {
-  "mfa_token": "temporary-mfa-token-uuid",
-  "code": "123456",
-  "method": "totp"
+  "mfa_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "code": "123456"
 }
 ```
 
-**Flow logic:**
-1. Validate `mfa_token` exists and has not expired (5-minute TTL stored in Redis).
-2. If `method` is `totp` → verify code against user's `mfa_secret` using TOTP algorithm (30-second window, allow ±1 period drift).
-3. If `method` is `email` → verify code against the OTP sent via email (6-digit, 10-minute TTL).
-4. If code is a recovery code → mark recovery code as used, verify match.
-5. On success → issue Sanctum token, create session, delete mfa_token from Redis.
-6. On failure → increment attempt counter. After 5 failures, invalidate mfa_token.
+**Flow:** Validate `mfa_token` JWT (5-min TTL, type `mfa_pending`). Verify TOTP code against user's `mfa_secret` (30-second window, ±1 period drift). On success → issue access token + refresh token + session_id.
 
-**Success response (200 OK):** Same as login success (token + user object).
-
-**Error responses:**
-| Status | Condition | Body |
-|---|---|---|
-| 401 | Invalid or expired MFA code | `{ "message": "Invalid verification code." }` |
-| 401 | MFA token expired | `{ "message": "MFA session expired. Please log in again." }` |
-| 429 | Too many attempts | `{ "message": "Too many failed MFA attempts. Please log in again." }` |
+**Success response (200 OK):** Same shape as normal login success (`access_token`, `refresh_token`, `session_id`, `user`).
 
 ---
 
-#### 1.3.4 POST `/api/auth/logout`
+**POST `/auth/mfa/send-email`** — Send email OTP for email MFA flow.
+**Request:** `{ "mfa_token": "..." }`
+**Flow:** Validate `mfa_token`, send 6-digit OTP to user's email (stored as SHA-256 hash in `mfa_email_tokens`, 5-min TTL). One active token per user; previous token deleted before issuing new one.
+
+---
+
+**POST `/auth/mfa/challenge/email`** — Email OTP MFA step 2.
+**Request:** `{ "mfa_token": "...", "code": "123456" }`
+**Flow:** Validate `mfa_token` JWT. Verify SHA-256(code) against `mfa_email_tokens`. On success → delete token, issue access token + refresh token + session_id.
+
+---
+
+**POST `/auth/mfa/recover`** — Recovery code MFA step 2.
+**Request:** `{ "mfa_token": "...", "recovery_code": "a1b2c3d4e5" }`
+**Flow:** Validate `mfa_token` JWT. Verify recovery code against bcrypt-hashed codes in `mfa_recovery_codes`. On success → remove used code, issue access token + refresh token + session_id.
+
+**Error responses (all MFA challenge endpoints):**
+| Status | Condition | Body |
+|---|---|---|
+| 401 | Invalid or expired MFA code | `{ "message": "Invalid verification code.", "error_code": "UNAUTHENTICATED" }` |
+| 401 | MFA token expired | `{ "message": "MFA session expired. Please log in again.", "error_code": "UNAUTHENTICATED" }` |
+
+---
+
+#### 1.3.4 POST `/auth/logout`
 
 **Purpose:** Revoke the current session token.
 **Authentication:** Required (Bearer token).
 
 **Request body:** None.
 
+**Request body:** `{ "refresh_token": "..." }` + `X-Session-ID` header.
+
 **Flow logic:**
-1. Revoke the current Sanctum token.
-2. Delete the corresponding `user_sessions` record.
+1. Revoke the provided refresh token (set `revoked_at`).
+2. Delete the corresponding `user_sessions` record (identified by `X-Session-ID`).
 3. Log `user.logout` to `audit_logs`.
 
 **Success response (200 OK):**
@@ -368,7 +397,7 @@ Authentication is the first system a user interacts with. It controls access to 
 
 ---
 
-#### 1.3.5 POST `/api/auth/forgot-password`
+#### 1.3.5 POST `/auth/forgot-password`
 
 **Purpose:** Initiate password reset flow.
 **Authentication:** None (public endpoint).
@@ -383,7 +412,7 @@ Authentication is the first system a user interacts with. It controls access to 
 
 **Flow logic:**
 1. Look up user by email. **Always return 200** regardless of whether user exists (prevents email enumeration).
-2. If user exists → generate signed reset token (60-minute TTL), store hash in `password_reset_tokens` table, send reset email with link.
+2. If user exists → generate 32-byte random hex token (60-minute TTL), store in `password_reset_tokens` table, send reset email with link.
 3. Reset link format: `{FRONTEND_URL}/auth/reset-password?token={token}&email={email}`
 
 **Success response (200 OK):**
@@ -395,7 +424,7 @@ Authentication is the first system a user interacts with. It controls access to 
 
 ---
 
-#### 1.3.6 POST `/api/auth/reset-password`
+#### 1.3.6 POST `/auth/reset-password`
 
 **Purpose:** Complete password reset.
 **Authentication:** None (public, token-validated).
@@ -414,7 +443,7 @@ Authentication is the first system a user interacts with. It controls access to 
 1. Validate token exists, matches email, and has not expired (60 minutes).
 2. Validate new password meets strength requirements.
 3. Update user's password (bcrypt hash).
-4. Delete all existing tokens for this user (Sanctum tokens + reset tokens).
+4. Revoke all refresh tokens for this user (set `revoked_at`). Delete `password_reset_tokens` record.
 5. Delete all `user_sessions` for this user (force re-login everywhere).
 6. Send confirmation email: "Your password was reset."
 7. Log `user.password_reset` to `audit_logs`.
@@ -434,21 +463,21 @@ Authentication is the first system a user interacts with. It controls access to 
 
 ---
 
-#### 1.3.7 POST `/api/auth/email/verify/{id}/{hash}`
+#### 1.3.7 POST `/auth/email/verify/:id/:hash`
 
 **Purpose:** Verify user email address.
-**Authentication:** None (signed URL).
+**Authentication:** None (public — uses userId + SHA-256 hash of email as verification).
 
 **Flow logic:**
-1. Validate the signed URL (signature + expiration check via Laravel's `URL::hasValidSignature()`).
+1. Find user by `id`. Verify `hash` matches `SHA-256(user.email)`.
 2. Set `email_verified_at` to current timestamp.
 3. Log `user.email_verified` to `audit_logs`.
 
-**Success response:** Redirect to `{FRONTEND_URL}/auth/login?verified=true`.
+**Success response (200 OK):** `{ "message": "Email verified successfully." }`
 
 ---
 
-#### 1.3.8 POST `/api/auth/email/resend-verification`
+#### 1.3.8 POST `/auth/email/resend-verification`
 
 **Purpose:** Resend verification email.
 **Authentication:** None (public).
@@ -465,7 +494,7 @@ Authentication is the first system a user interacts with. It controls access to 
 
 ---
 
-#### 1.3.9 GET `/api/auth/me`
+#### 1.3.9 GET `/auth/me`
 
 **Purpose:** Get current authenticated user profile.
 **Authentication:** Required.
@@ -498,7 +527,7 @@ Authentication is the first system a user interacts with. It controls access to 
 
 ---
 
-#### 1.3.10 PUT `/api/auth/me`
+#### 1.3.10 PUT `/auth/me`
 
 **Purpose:** Update current user's profile.
 **Authentication:** Required.
@@ -522,8 +551,8 @@ Authentication is the first system a user interacts with. It controls access to 
 
 #### 1.3.11 MFA Setup Endpoints
 
-**POST `/api/auth/mfa/setup`** — Generate TOTP secret and QR code URI.
-**Authentication:** Required. Requires `current_password` in body for verification.
+**POST `/auth/mfa/setup`** — Generate TOTP secret and QR code URI.
+**Authentication:** Required (JWT). Requires `current_password` in body for verification.
 
 **Response:**
 ```json
@@ -545,11 +574,11 @@ Authentication is the first system a user interacts with. It controls access to 
 }
 ```
 
-**POST `/api/auth/mfa/confirm`** — Confirm MFA setup by verifying a TOTP code.
+**POST `/auth/mfa/confirm`** — Confirm MFA setup by verifying a TOTP code.
 **Request:** `{ "code": "123456" }`
-**Flow:** Verify code against the secret. If valid → set `mfa_enabled = true`, encrypt and store secret + recovery codes. Log `user.mfa_enabled`.
+**Flow:** Verify code against the secret using otplib. If valid → set `mfa_enabled = true`, store secret + bcrypt-hashed recovery codes. Log `user.mfa_enabled`.
 
-**DELETE `/api/auth/mfa`** — Disable MFA.
+**DELETE `/auth/mfa`** — Disable MFA.
 **Request:** `{ "current_password": "...", "code": "123456" }`
 **Flow:** Verify password + TOTP code. If valid → set `mfa_enabled = false`, null out `mfa_secret` and `mfa_recovery_codes`. Log `user.mfa_disabled`.
 
@@ -557,8 +586,8 @@ Authentication is the first system a user interacts with. It controls access to 
 
 #### 1.3.12 Session Management Endpoints
 
-**GET `/api/auth/sessions`** — List active sessions for current user.
-**Authentication:** Required.
+**GET `/auth/sessions`** — List active sessions for current user.
+**Authentication:** Required (JWT + `X-Session-ID` header to identify current session).
 
 **Response:**
 ```json
@@ -576,31 +605,29 @@ Authentication is the first system a user interacts with. It controls access to 
 }
 ```
 
-**DELETE `/api/auth/sessions/{id}`** — Revoke a specific session.
-**Authentication:** Required. User can revoke own sessions. Admins can revoke any session in their org.
+**DELETE `/auth/sessions/:id`** — Revoke a specific session.
+**Authentication:** Required (JWT). User can only revoke their own sessions.
 
-**DELETE `/api/auth/sessions`** — Revoke all sessions except current.
-**Authentication:** Required. Request body: `{ "current_password": "..." }`.
+**DELETE `/auth/sessions`** — Revoke all sessions except current.
+**Authentication:** Required (JWT + `X-Session-ID` header). Request body: `{ "current_password": "..." }`.
 
 ---
 
 #### 1.3.13 User Management Endpoints (Admin Only)
 
-**GET `/api/users`** — List all users in the organization.
-**Authentication:** Required. Role: `admin` or `manager` (managers get read-only).
-**Query params (Spatie Query Builder):**
+**GET `/users`** — List all users in the organization.
+**Authentication:** Required (JWT). Role: `admin` or `manager`.
+**Query params (flat):**
 ```
-?filter[role]=manager
-&filter[search]=erik
-&filter[is_active]=true
+?role=manager
+&search=erik
+&is_active=true
 &sort=-created_at
-&include=organization
-&page[number]=1
-&page[size]=25
+&page=1
+&page_size=25
 ```
-**Allowed filters:** `role` (exact), `search` (partial — matches `name` and `email`), `is_active` (exact).
+**Allowed filters:** `role` (exact), `search` (partial — matches `name` and `email`), `is_active` (boolean).
 **Allowed sorts:** `name`, `email`, `role`, `created_at`, `last_login_at`.
-**Allowed includes:** `organization`.
 
 **Response:**
 ```json
@@ -626,8 +653,17 @@ Authentication is the first system a user interacts with. It controls access to 
 }
 ```
 
-**POST `/api/users/invite`** — Invite a new user.
-**Authentication:** Required. Role: `admin`.
+**GET `/auth/accept-invite/:token`** — Get invitation details before accepting.
+**Authentication:** None (public).
+**Response:** `{ email, role, org: { name, slug } }`
+
+**POST `/auth/accept-invite`** — Accept invitation and create account.
+**Authentication:** None (public, token-validated).
+**Request:** `{ token, name, password, password_confirmation }`
+**Flow:** Validate token, create user with `email_verified_at` set (auto-verified), return tokens + session_id directly (no separate login step).
+
+**POST `/users/invite`** — Invite a new user.
+**Authentication:** Required (JWT). Role: `admin`.
 
 **Request:**
 ```json
@@ -644,26 +680,26 @@ Authentication is the first system a user interacts with. It controls access to 
 3. Send invitation email with link: `{FRONTEND_URL}/auth/accept-invite?token={token}`.
 4. Log `user.invited`.
 
-**PUT `/api/users/{id}/role`** — Change a user's role.
-**Authentication:** Required. Role: `admin`. Cannot change own role.
+**PUT `/users/:id/role`** — Change a user's role.
+**Authentication:** Required (JWT). Role: `admin`. Cannot change own role.
 
 **Request:** `{ "role": "agent" }`
 
-**PUT `/api/users/{id}/deactivate`** — Deactivate a user.
-**Authentication:** Required. Role: `admin`. Cannot deactivate self.
+**PUT `/users/:id/deactivate`** — Deactivate a user.
+**Authentication:** Required (JWT). Role: `admin`. Cannot deactivate self.
 
 **Flow:**
 1. Set `is_active = false`.
-2. Revoke ALL Sanctum tokens for this user.
+2. Revoke ALL refresh tokens for this user (set `revoked_at`).
 3. Delete all `user_sessions` for this user.
 4. Log `user.deactivated`.
 
-**PUT `/api/users/{id}/activate`** — Reactivate a user.
-**Authentication:** Required. Role: `admin`.
+**PUT `/users/:id/activate`** — Reactivate a user.
+**Authentication:** Required (JWT). Role: `admin`.
 
-**DELETE `/api/users/{id}/force-logout`** — Force logout a user.
-**Authentication:** Required. Role: `admin`.
-**Flow:** Revoke all tokens + delete all sessions for the target user.
+**DELETE `/users/:id/force-logout`** — Force logout a user.
+**Authentication:** Required (JWT). Role: `admin`.
+**Flow:** Revoke all refresh tokens + delete all sessions for the target user. Log `user.force_logout`.
 
 ---
 
@@ -693,21 +729,17 @@ Every API endpoint must check the user's role. The following matrix defines acce
 | Export data | Yes | Yes | No |
 | Compliance reports | Yes | Read-only | No |
 
-**Implementation:** Create a Laravel middleware `CheckRole` and use Laravel Policies for resource-level authorization.
+**Implementation:** NestJS uses `JwtAuthGuard` + `RolesGuard` + `@Roles()` decorator. The central RBAC matrix is in `src/auth/permissions.ts`. Route-level protection example:
 
-```php
-// Example middleware usage in routes
-Route::middleware(['auth:sanctum', 'role:admin'])->group(function () {
-    Route::post('/users/invite', [UserController::class, 'invite']);
-});
+```typescript
+// Protect with JWT + role check
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles('admin')
+@Post('invite')
+invite(@Body() dto: InviteUserDto, @Request() req) { ... }
 
-// Example policy
-public function update(User $authUser, Campaign $campaign): bool
-{
-    if ($authUser->role === 'admin') return true;
-    if ($authUser->role === 'manager' && $campaign->org_id === $authUser->org_id) return true;
-    return false;
-}
+// Extract current user from JWT payload
+req.user  // → { userId, orgId, role }
 ```
 
 ### 1.5 Frontend Pages & Behavior
@@ -726,9 +758,9 @@ public function update(User $authUser, Campaign $campaign): bool
 
 **Behavior:**
 1. Client-side validation on blur (email format, password not empty).
-2. On submit → show loading spinner on button → call POST `/api/auth/login`.
-3. If success with no MFA → store token, redirect to `/dashboard`.
-4. If success with MFA → redirect to `/auth/mfa-verify` with `mfa_token` in state.
+2. On submit → show loading spinner on button → call POST `/auth/login`.
+3. If success with no MFA → store `access_token` + `refresh_token` + `session_id`, redirect to `/dashboard`.
+4. If success with MFA → redirect to `/auth/mfa-verify` with `mfa_token` + `mfa_method` in state.
 5. If 401 → show "Invalid email or password" error below form.
 6. If 403 (deactivated) → show error message with contact admin guidance.
 7. If 403 (unverified) → show message with "Resend verification email" button.
@@ -744,8 +776,8 @@ public function update(User $authUser, Campaign $campaign): bool
 - "Back to login" link
 
 **Behavior:**
-1. If method is `email` and page loads → auto-send email OTP via POST `/api/auth/mfa/send-email`.
-2. On submit → call POST `/api/auth/mfa/verify`.
+1. If `mfa_method` is `email` and page loads → auto-send email OTP via POST `/auth/mfa/send-email`.
+2. On submit → call POST `/auth/mfa/challenge` (TOTP) or POST `/auth/mfa/challenge/email` (email OTP).
 3. If success → store token, redirect to `/dashboard`.
 4. If fail → shake input, show error, clear code fields.
 5. If mfa_token expires (5 min) → redirect to `/auth/login` with message.
@@ -765,7 +797,7 @@ public function update(User $authUser, Campaign $campaign): bool
 
 **Behavior:**
 1. Real-time password strength indicator.
-2. On submit → call POST `/api/auth/register`.
+2. On submit → call POST `/auth/register`.
 3. On success → redirect to `/auth/verify-email` with success message.
 4. On 422 → show field-level errors.
 
@@ -777,7 +809,7 @@ public function update(User $authUser, Campaign $campaign): bool
 #### Accept Invitation Page (`/auth/accept-invite?token=...`)
 
 **Fields:** Name (pre-filled if provided), password, confirm password.
-**Flow:** Call POST `/api/auth/accept-invite` → on success → redirect to login.
+**Flow:** Call POST `/auth/accept-invite` → on success → tokens returned directly, redirect to `/dashboard` (no separate login step).
 
 ### 1.6 Acceptance Criteria
 
@@ -805,7 +837,7 @@ public function update(User $authUser, Campaign $campaign): bool
 
 **PRD References:** CMP-001, CMP-003, CMP-004, CMP-005, CMP-006
 **Priority:** CRITICAL
-**Owner:** Backend (Laravel) + AI Services (Python)
+**Owner:** Backend (NestJS) + AI Services (Python)
 
 ### 2.1 Overview
 
@@ -929,7 +961,7 @@ For `optout_detection`:
 
 #### 2.3.1 Consent Management
 
-**POST `/api/compliance/consent`** — Record consent for a lead.
+**POST `/compliance/consent`** — Record consent for a lead.
 **Authentication:** Required. Role: `admin`, `manager`.
 
 **Request:**
@@ -944,12 +976,12 @@ For `optout_detection`:
 }
 ```
 
-**GET `/api/compliance/consent/{lead_id}`** — Get consent history for a lead.
+**GET `/compliance/consent/:lead_id`** — Get consent history for a lead.
 **Authentication:** Required. Role: `admin`, `manager`.
 
 #### 2.3.2 DNC Management
 
-**GET `/api/compliance/dnc/check/{phone_number}`** — Check if a number is on DNC.
+**GET `/compliance/dnc/check/:phone_number`** — Check if a number is on DNC.
 **Authentication:** Required.
 
 **Response:**
@@ -969,36 +1001,36 @@ For `optout_detection`:
 }
 ```
 
-**POST `/api/compliance/dnc`** — Manually add a number to DNC.
+**POST `/compliance/dnc`** — Manually add a number to DNC.
 **Authentication:** Required. Role: `admin`, `manager`.
 
-**POST `/api/compliance/dnc/sync`** — Trigger DNC registry sync from national provider.
+**POST `/compliance/dnc/sync`** — Trigger DNC registry sync from national provider.
 **Authentication:** Required. Role: `admin`.
 
 #### 2.3.3 Recording Disclosures
 
-**GET `/api/compliance/disclosures`** — List all recording disclosures for the org.
-**POST `/api/compliance/disclosures`** — Create a new disclosure.
-**PUT `/api/compliance/disclosures/{id}`** — Update a disclosure.
+**GET `/compliance/disclosures`** — List all recording disclosures for the org.
+**POST `/compliance/disclosures`** — Create a new disclosure.
+**PUT `/compliance/disclosures/:id`** — Update a disclosure.
 
 #### 2.3.4 Audit Trail
 
-**GET `/api/compliance/audit`** — Query audit trail.
+**GET `/compliance/audit`** — Query audit trail.
 **Authentication:** Required. Role: `admin`.
 
-**Query params (Spatie Query Builder):**
+**Query params (flat):**
 ```
-?filter[call_id]=uuid
-&filter[lead_id]=uuid
-&filter[check_type]=consent,dnc
-&filter[status]=passed,failed
-&filter[date_from]=2026-03-01
-&filter[date_to]=2026-03-03
+?call_id=uuid
+&lead_id=uuid
+&check_type=consent
+&status=passed
+&date_from=2026-03-01
+&date_to=2026-03-03
 &sort=-created_at
-&page[number]=1
-&page[size]=50
+&page=1
+&page_size=50
 ```
-**Allowed filters:** `call_id` (exact), `lead_id` (exact), `check_type` (exact, comma-separated for multiple), `status` (exact, comma-separated), `date_from` (scope — `>=`), `date_to` (scope — `<=`).
+**Allowed filters:** `call_id` (exact), `lead_id` (exact), `check_type` (exact), `status` (exact), `date_from` (scope — `>=`), `date_to` (scope — `<=`).
 **Allowed sorts:** `created_at`, `check_type`, `status`.
 
 **Response:**
@@ -1019,10 +1051,10 @@ For `optout_detection`:
 }
 ```
 
-**GET `/api/compliance/audit/export`** — Export audit trail as CSV.
+**GET `/compliance/audit/export`** — Export audit trail as CSV.
 **Authentication:** Required. Role: `admin`.
-**Query params:** Same Spatie filters as above.
-**Response:** Returns a download URL for a CSV file generated asynchronously.
+**Query params:** Same flat filters as above (no `page`/`page_size` — returns all matching records).
+**Response:** Streams CSV directly. `Content-Disposition: attachment; filename="compliance_audit.csv"`.
 
 ### 2.4 Compliance Pipeline (Internal Service)
 
@@ -1191,7 +1223,7 @@ interface ITelephonyProvider {
 
 ### 3.5 API Endpoints
 
-**GET `/api/calls`** — List calls with filters.
+**GET `/calls`** — List calls with filters.
 **Authentication:** Required. Role: `admin`, `manager`.
 
 **Query params:**
@@ -1211,10 +1243,10 @@ interface ITelephonyProvider {
 **Allowed sorts:** `started_at`, `ended_at`, `duration_seconds`, `status`, `intent_result`.
 **Allowed includes:** `complianceChecks`.
 
-**GET `/api/calls/{id}`** — Get call details including compliance checks.
+**GET `/calls/:id`** — Get call details including compliance checks.
 **Authentication:** Required. Role: `admin`, `manager`.
 
-**GET `/api/calls/{id}/recording`** — Get a pre-signed URL for call recording playback (expires in 1 hour).
+**GET `/calls/:id/recording`** — Get a pre-signed URL for call recording playback (expires in 1 hour).
 **Authentication:** Required. Role: `admin`, `manager`.
 
 **Response:**
@@ -1222,7 +1254,7 @@ interface ITelephonyProvider {
 { "url": "https://...", "expires_at": "2026-03-31T10:00:00Z" }
 ```
 
-**GET `/api/calls/{id}/transcript`** — Get call transcript metadata.
+**GET `/calls/:id/transcript`** — Get call transcript metadata.
 **Authentication:** Required. Role: `admin`, `manager`.
 
 **Response:**
@@ -1332,7 +1364,7 @@ Classification happens real-time (for opt-out detection) and post-call (final `c
 
 ### 4.7 API Endpoints (NestJS)
 
-**GET `/api/ai/voices`** — List available TTS voices. Role: all roles.
+**GET `/ai/voices`** — List available TTS voices. Role: all roles.
 
 Response:
 ```json
@@ -1343,10 +1375,10 @@ Response:
 }
 ```
 
-**GET `/api/ai/voices/{id}/preview`** — Get voice preview URL (expires 1h). Role: all roles.
+**GET `/ai/voices/:id/preview`** — Get voice preview URL (expires 1h). Role: all roles.
 Stub until Cartesia API integrated — returns `preview_url: null`.
 
-**POST `/api/ai/scripts/validate`** — Validate campaign script. Role: `admin`, `manager`.
+**POST `/ai/scripts/validate`** — Validate campaign script. Role: `admin`, `manager`.
 
 Request: `{ "script": "Hello {lead_name}..." }`
 
@@ -1453,9 +1485,9 @@ Response:
 
 #### 5.2.1 CRUD
 
-**POST `/api/campaigns`** — Create a campaign. Role: `admin`, `manager`.
+**POST `/campaigns`** — Create a campaign. Role: `admin`, `manager`.
 
-**GET `/api/campaigns`** — List campaigns. Query params:
+**GET `/campaigns`** — List campaigns. Query params:
 ```
 ?status=active,paused
 &search=payment
@@ -1468,24 +1500,24 @@ Response:
 **Allowed sorts:** `name`, `status`, `created_at`, `updated_at`.
 **Allowed includes:** `leadStats` → appends `{ total, contacted, converted }` counts.
 
-**GET `/api/campaigns/{id}`** — Get campaign details. Role: `admin`, `manager`.
+**GET `/campaigns/:id`** — Get campaign details. Role: `admin`, `manager`.
 
-**PUT `/api/campaigns/{id}`** — Update campaign. Only allowed when status is `draft` or `paused`. Role: `admin`, `manager`.
+**PUT `/campaigns/:id`** — Update campaign. Only allowed when status is `draft` or `paused`. Role: `admin`, `manager`.
 
-**DELETE `/api/campaigns/{id}`** — Soft delete. Only allowed when status is `draft` or `completed`. Role: `admin`.
+**DELETE `/campaigns/:id`** — Soft delete. Only allowed when status is `draft` or `completed`. Role: `admin`.
 
 #### 5.2.2 Campaign Actions
 
-**POST `/api/campaigns/{id}/activate`** — Activate campaign.
+**POST `/campaigns/:id/activate`** — Activate campaign.
 Preconditions: must be `draft` or `paused`; must have ≥1 lead; disclosure must exist.
 
-**POST `/api/campaigns/{id}/pause`** — Pause active campaign. In-progress calls complete; no new calls.
+**POST `/campaigns/:id/pause`** — Pause active campaign. In-progress calls complete; no new calls.
 
-**POST `/api/campaigns/{id}/resume`** — Resume paused campaign. Status → `active`.
+**POST `/campaigns/:id/resume`** — Resume paused campaign. Status → `active`.
 
 #### 5.2.3 Lead Upload
 
-**POST `/api/campaigns/{id}/leads/upload`** — Upload leads via CSV.
+**POST `/campaigns/:id/leads/upload`** — Upload leads via CSV.
 Content-Type: `multipart/form-data`. Role: `admin`, `manager`. Max file size: 10MB.
 
 Fields:
@@ -1500,7 +1532,7 @@ Response (202 Accepted):
 { "data": { "upload_id": "uuid", "status": "processing", "total_rows": 0, "message": "..." } }
 ```
 
-**GET `/api/campaigns/{id}/leads/uploads/{upload_id}`** — Poll upload status.
+**GET `/campaigns/:id/leads/uploads/:upload_id`** — Poll upload status.
 
 Response (completed):
 ```json
@@ -1986,7 +2018,7 @@ Note: `errors` field is only present for validation failures.
 | Variable | Description | Example |
 |---|---|---|
 | `APP_ENV` | Environment | production, staging |
-| `APP_URL` | Laravel API base URL | https://api.astos.ai |
+| `APP_URL` | NestJS API base URL | https://api.astos.ai |
 | `FRONTEND_URL` | Next.js app URL | https://app.astos.ai |
 | `DB_CONNECTION` | Database driver | pgsql |
 | `DB_HOST` | Cloud SQL host | /cloudsql/project:region:instance |
