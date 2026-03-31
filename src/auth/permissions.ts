@@ -30,4 +30,14 @@ export const PERMISSIONS = {
   // ─── Telephony ────────────────────────────────────────────────────────────
   CALLS_READ:      ['admin', 'manager'] as const,
   CALLS_RECORDING: ['admin', 'manager'] as const,
+
+  // ─── Campaigns ────────────────────────────────────────────────────────────
+  CAMPAIGNS_READ:         ['admin', 'manager'] as const,
+  CAMPAIGNS_WRITE:        ['admin', 'manager'] as const,
+  CAMPAIGNS_DELETE:       ['admin'] as const,
+  CAMPAIGNS_LEADS_UPLOAD: ['admin', 'manager'] as const,
+
+  // ─── AI Voice Pipeline ────────────────────────────────────────────────────
+  AI_VOICES_READ:       ['admin', 'manager', 'agent'] as const,
+  AI_SCRIPTS_VALIDATE:  ['admin', 'manager'] as const,
 } as const;

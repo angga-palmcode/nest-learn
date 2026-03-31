@@ -10,6 +10,8 @@ import { PrismaModule } from './prisma/prisma.module';
 import { UsersModule } from './users/users.module';
 import { ComplianceModule } from './compliance/compliance.module';
 import { TelephonyModule } from './telephony/telephony.module';
+import { CampaignsModule } from './campaigns/campaigns.module';
+import { AiModule } from './ai/ai.module';
 
 @Module({
   imports: [
@@ -22,6 +24,8 @@ import { TelephonyModule } from './telephony/telephony.module';
     UsersModule,
     ComplianceModule,
     TelephonyModule,
+    CampaignsModule,
+    AiModule,
   ],
   controllers: [AppController],
   providers: [AppService],

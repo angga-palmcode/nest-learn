@@ -7,6 +7,8 @@
 | 1 | Authentication & User Management | ✅ Done | JWT + refresh tokens, TOTP MFA, Email OTP MFA, sessions, invitations, password reset, user CRUD, org management |
 | 2 | Compliance Engine | ✅ Done | Consent, DNC, recording disclosures, audit trail + CSV export, `runComplianceChecks()` pipeline |
 | 3 | Telephony | ✅ Done | `Call` model, list/get/recording/transcript endpoints, Telnyx + Twilio adapters (stubs), provider failover, `placeCall()` internal method |
+| 4 | AI Voice Pipeline | ✅ Done (NestJS part) | Voices list, voice preview stub, script validator. STT/LLM/TTS pipeline is Python — not in this repo. |
+| 5 | Campaign Management | ✅ Done | `Campaign`, `Lead`, `LeadUpload` models, full CRUD, activate/pause/resume actions, CSV lead upload with async processing |
 
 ---
 
@@ -137,6 +139,22 @@ src/
 │       ├── create-disclosure.dto.ts
 │       ├── update-disclosure.dto.ts
 │       └── query-compliance-audit.dto.ts
+│
+├── ai/                         AI Voice Pipeline module (NestJS surface only)
+│   ├── ai.module.ts
+│   ├── ai.service.ts
+│   ├── ai.controller.ts
+│   └── dto/
+│       └── validate-script.dto.ts
+│
+├── campaigns/                  Campaign Management module
+│   ├── campaigns.module.ts
+│   ├── campaigns.service.ts
+│   ├── campaigns.controller.ts
+│   └── dto/
+│       ├── create-campaign.dto.ts
+│       ├── update-campaign.dto.ts
+│       └── list-campaigns.dto.ts
 │
 ├── telephony/                  Telephony module (Telnyx + Twilio)
 │   ├── telephony.module.ts
@@ -303,6 +321,58 @@ prisma/
 | checked_at | TIMESTAMP | |
 | created_at | TIMESTAMP | immutable — no UPDATE/DELETE ever |
 
+### `Campaign`
+| Column | Type | Notes |
+|---|---|---|
+| id | UUID PK | auto |
+| org_id | UUID FK → Organization | |
+| name | VARCHAR(255) | |
+| description | TEXT NULLABLE | |
+| status | ENUM(draft, active, paused, completed, archived) | default draft |
+| script | TEXT | System prompt / conversation script |
+| voice_id | VARCHAR(100) | TTS voice identifier |
+| language | VARCHAR(10) | default sv |
+| caller_id | VARCHAR(20) | Outbound caller ID (E.164) |
+| disclosure_id | UUID FK → RecordingDisclosure | |
+| schedule_timezone | VARCHAR(50) | default Europe/Stockholm |
+| schedule_start_time | VARCHAR(5) | HH:MM e.g. "09:00" |
+| schedule_end_time | VARCHAR(5) | HH:MM e.g. "17:00" |
+| schedule_days | JSON | Array of weekday numbers [1-7], 1=Mon |
+| max_concurrent_calls | INT | default 10 |
+| max_attempts_per_lead | INT | default 3 |
+| retry_interval_minutes | INT | default 60 |
+| amd_action | ENUM(hang_up, leave_message, retry_later) | default hang_up |
+| voicemail_script | TEXT NULLABLE | Used when amd_action = leave_message |
+| created_by | UUID FK → User | |
+| started_at / completed_at | TIMESTAMP NULLABLE | |
+| created_at / updated_at / deleted_at | TIMESTAMP | soft delete |
+
+### `Lead`
+| Column | Type | Notes |
+|---|---|---|
+| id | UUID PK | auto |
+| org_id | UUID FK → Organization | |
+| campaign_id | UUID FK → Campaign | |
+| name | VARCHAR(255) | |
+| phone | VARCHAR(20) | E.164 format |
+| email | VARCHAR(255) NULLABLE | |
+| status | ENUM(pending, in_progress, contacted, converted, dnc, failed, skipped) | default pending |
+| attempt_count | INT | default 0 |
+| last_attempted_at | TIMESTAMP NULLABLE | |
+| custom_fields | JSON NULLABLE | Extra CSV columns |
+| created_at / updated_at | TIMESTAMP | |
+
+### `LeadUpload`
+| Column | Type | Notes |
+|---|---|---|
+| id | UUID PK | auto |
+| org_id | — | |
+| campaign_id | UUID FK → Campaign | |
+| status | ENUM(processing, completed, failed) | default processing |
+| total_rows / valid_rows / invalid_rows / duplicate_rows | INT | |
+| errors | JSON NULLABLE | `[{row, field, error}]` |
+| created_at / updated_at | TIMESTAMP | |
+
 ### `Call`
 | Column | Type | Notes |
 |---|---|---|
@@ -409,6 +479,29 @@ prisma/
 | PUT | `/compliance/disclosures/:id` | admin, manager | partial disclosure fields | Update disclosure |
 | GET | `/compliance/audit` | admin | `?call_id=&lead_id=&check_type=&status=&date_from=&date_to=&sort=&page=&page_size=` | Query compliance audit trail |
 | GET | `/compliance/audit/export` | admin | same filters as audit | Download audit as CSV |
+
+### AI (`/ai`) — all require JWT
+
+| Method | Path | Role | Description |
+|--------|------|------|-------------|
+| GET | `/ai/voices` | all roles | List available TTS voices |
+| GET | `/ai/voices/:id/preview` | all roles | Get voice preview URL (stub — Cartesia integration pending) |
+| POST | `/ai/scripts/validate` | admin, manager | Validate script: extract `{variables}`, estimate tokens, check syntax |
+
+### Campaigns (`/campaigns`) — all require JWT
+
+| Method | Path | Role | Body / Query | Description |
+|--------|------|------|-------------|-------------|
+| POST | `/campaigns` | admin, manager | `{ name, script, voice_id, caller_id, disclosure_id, schedule_start_time, schedule_end_time, schedule_days, ... }` | Create campaign |
+| GET | `/campaigns` | admin, manager | `?status=&search=&sort=&include=leadStats&page=&page_size=` | List campaigns |
+| GET | `/campaigns/:id` | admin, manager | — | Get campaign details |
+| PUT | `/campaigns/:id` | admin, manager | partial fields | Update (draft or paused only) |
+| DELETE | `/campaigns/:id` | admin | — | Soft delete (draft or completed only) |
+| POST | `/campaigns/:id/activate` | admin, manager | — | Activate campaign (requires ≥1 lead + valid disclosure) |
+| POST | `/campaigns/:id/pause` | admin, manager | — | Pause active campaign |
+| POST | `/campaigns/:id/resume` | admin, manager | — | Resume paused campaign |
+| POST | `/campaigns/:id/leads/upload` | admin, manager | `multipart/form-data: file, field_mapping (JSON), skip_first_row` | Upload CSV leads → 202 + upload_id |
+| GET | `/campaigns/:id/leads/uploads/:upload_id` | admin, manager | — | Check upload status |
 
 ### Calls (`/calls`) — all require JWT
 
@@ -588,3 +681,13 @@ req.user  // → { userId, orgId, role }
 - **`GET /calls/:id/recording`** — returns `recording_url` directly (no real pre-signed URL yet). Replace with GCS/S3 signed URL when Cloud Storage is configured.
 - **`GET /calls/:id/transcript`** — returns `transcript_url` only (no JSON fetch). Replace with actual fetch + parse from Cloud Storage.
 - **`placeCall()` is internal** — not exposed as an HTTP route. Will be called by the Campaign Dialer module. Requires `callingWindowStart`, `callingWindowEnd`, and `timezone` from campaign config.
+- **AI Voice Pipeline is Python** — STT (Deepgram/AssemblyAI), LLM (GPT-4o/Claude Haiku), TTS (Cartesia/ElevenLabs) all live in the Python AI service. The NestJS `AiModule` only exposes 3 utility endpoints.
+- **`GET /ai/voices/:id/preview`** — stub. Returns `preview_url: null` until Cartesia API is integrated.
+- **`POST /ai/scripts/validate`** — validates `{variable}` syntax, extracts variable names, estimates token count (`chars / 4`). Warns if estimated tokens > 8,000.
+- **Voices are hardcoded** — 4 defaults (sv/en × female/male). Extend `VOICES` array in `ai.service.ts` when real Cartesia voice IDs are available.
+- **Campaign `schedule_start_time` / `schedule_end_time`** — stored as `VARCHAR(5)` strings in `HH:MM` format (not a DB TIME type). Parse with `split(':')` to get hours/minutes.
+- **CSV lead upload is async** — `POST /campaigns/:id/leads/upload` returns 202 immediately with an `upload_id`. Processing happens in the background via an unawaited Promise. Poll `GET /campaigns/:id/leads/uploads/:upload_id` for completion.
+- **Phone normalization in CSV upload** — Swedish numbers without country code (`07XXXXXXXX`) are automatically prefixed with `+46`. Numbers starting with `00` are converted to `+`. E.164 numbers with `+` are accepted as-is.
+- **Duplicate lead detection** — during CSV upload, a lead is considered a duplicate if the same `phone` already exists in the campaign. Duplicates are counted but not re-created.
+- **Campaign activate preconditions** — (1) status must be `draft` or `paused`, (2) must have ≥1 lead, (3) `disclosure_id` must point to an existing disclosure in the org.
+- **`leadStats` include** — appended to each campaign in `GET /campaigns` when `include=leadStats`. Adds `{ total, contacted, converted }` counts via separate count queries.

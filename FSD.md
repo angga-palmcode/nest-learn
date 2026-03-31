@@ -1259,3 +1259,290 @@ The telephony module publishes webhook events to client systems (see Module 8 fo
 | AC-TEL-07 | Webhook events fire for all call state changes | Set up webhook listener → place call → verify all events received |
 
 ---
+
+## 4. MODULE: AI Voice Pipeline
+
+**PRD References:** AI-001 through AI-005
+**Priority:** CRITICAL
+**Owner:** AI Services (Python) + Backend (NestJS — utility endpoints only)
+
+### 4.1 Overview
+
+The AI Voice Pipeline is the brain of every call. It converts speech to text, generates contextually appropriate responses using an LLM, and converts those responses back to speech — all in real-time with < 800ms end-to-end latency at P50.
+
+**Note:** The STT/LLM/TTS pipeline runs entirely in the Python AI service. The NestJS backend exposes only 3 utility endpoints (voices, preview, script validation).
+
+### 4.2 Pipeline Architecture
+
+```
+Lead speaks → Audio stream
+    → STT (Deepgram Nova-3, < 300ms)
+        → Text
+            → LLM (GPT-4o, 150-300ms TTFT)
+                → Response text
+                    → TTS (Cartesia Sonic, 50-100ms)
+                        → Audio stream → Lead hears response
+```
+
+| Component | Target | Primary | Failover |
+|---|---|---|---|
+| STT | < 300ms | Deepgram Nova-3 | AssemblyAI |
+| LLM | 150–300ms TTFT | GPT-4o / GPT-4o-mini | Claude Haiku |
+| TTS | 50–100ms | Cartesia Sonic | ElevenLabs Flash |
+| Total E2E | P50 < 600ms, P95 < 800ms, P99 < 1200ms | | |
+
+### 4.3 STT Specification
+
+Primary: Deepgram Nova-3 (streaming WebSocket). Failover: AssemblyAI (real-time WebSocket).
+
+Failover trigger: WebSocket fails to establish within 3s, or drops mid-call with >2 reconnect failures.
+
+### 4.4 LLM Conversation Engine
+
+System prompt structure:
+```
+[SYSTEM CONTEXT] — org name, campaign objective, agent name
+[COMPLIANCE RULES — NEVER OVERRIDE] — opt-out handling, no financial advice
+[CAMPAIGN SCRIPT] — with variables resolved
+[LEAD CONTEXT] — name, account, custom fields
+[CONVERSATION RULES] — response length, AI identity disclosure, intent classification
+```
+
+Variable resolution: All `{variable}` placeholders in the campaign script are resolved from lead data before the call starts.
+
+Conversation memory: Full transcript sent as context each turn. Max 8,000 tokens; earlier turns summarized if exceeded.
+
+### 4.5 TTS Specification
+
+Primary: Cartesia Sonic (streaming). Failover: ElevenLabs Flash v2.5.
+
+Output format: `pcm_16000` (16kHz PCM for telephony). Voice is configurable per campaign.
+
+### 4.6 Intent Classification
+
+| Intent | Definition |
+|---|---|
+| `interested` | Lead shows willingness to engage |
+| `not_interested` | Lead explicitly declines but doesn't opt out |
+| `callback_requested` | Lead asks to be called at a different time |
+| `dnc_requested` | Lead explicitly asks to not be contacted again |
+| `undetermined` | Call ended before clear intent was expressed |
+
+Classification happens real-time (for opt-out detection) and post-call (final `calls.intent_result`).
+
+### 4.7 API Endpoints (NestJS)
+
+**GET `/api/ai/voices`** — List available TTS voices. Role: all roles.
+
+Response:
+```json
+{
+  "data": [
+    { "id": "sv-female-professional", "name": "Swedish Female — Professional", "language": "sv-SE", "gender": "female", "provider": "cartesia", "preview_available": false }
+  ]
+}
+```
+
+**GET `/api/ai/voices/{id}/preview`** — Get voice preview URL (expires 1h). Role: all roles.
+Stub until Cartesia API integrated — returns `preview_url: null`.
+
+**POST `/api/ai/scripts/validate`** — Validate campaign script. Role: `admin`, `manager`.
+
+Request: `{ "script": "Hello {lead_name}..." }`
+
+Response:
+```json
+{
+  "valid": true,
+  "variables": ["lead_name", "organization_name"],
+  "estimated_tokens": 420,
+  "errors": []
+}
+```
+
+### 4.8 Acceptance Criteria
+
+| ID | Criterion | How to Verify |
+|---|---|---|
+| AC-AI-01 | E2E voice latency P50 < 600ms | Load test: 50 concurrent calls → measure P50 latency |
+| AC-AI-02 | E2E voice latency P95 < 800ms | Same load test → measure P95 |
+| AC-AI-03 | E2E voice latency P99 < 1200ms | Same load test → measure P99 |
+| AC-AI-04 | STT failover works when Deepgram is unavailable | Block Deepgram → call proceeds via AssemblyAI |
+| AC-AI-05 | LLM failover works when GPT-4o is unavailable | Block OpenAI → call proceeds via Claude Haiku |
+| AC-AI-06 | TTS failover works when Cartesia is unavailable | Block Cartesia → call proceeds via ElevenLabs |
+| AC-AI-07 | AI follows campaign script correctly | Run test calls → verify script flow |
+| AC-AI-08 | AI handles objections naturally | Script includes objection handling → AI responds appropriately |
+| AC-AI-09 | Intent classification accuracy > 85% | Run 100 test calls with known intents → measure accuracy |
+| AC-AI-10 | Variables in scripts are correctly resolved | Script with variables → call uses actual lead data |
+| AC-AI-11 | AI honestly identifies itself as AI when asked | Ask "Are you a robot?" → AI confirms honestly |
+
+---
+
+## 5. MODULE: Campaign Management
+
+**PRD References:** CAM-001 through CAM-004
+**Priority:** CRITICAL
+**Owner:** Backend (NestJS) + Frontend (Next.js)
+
+### 5.1 Data Models
+
+#### Table: `campaigns`
+
+| Column | Type | Constraints | Description |
+|---|---|---|---|
+| `id` | UUID | PK | |
+| `org_id` | UUID | FK → organizations.id, NOT NULL | |
+| `name` | VARCHAR(255) | NOT NULL | |
+| `description` | TEXT | NULLABLE | |
+| `status` | ENUM('draft', 'active', 'paused', 'completed', 'archived') | NOT NULL, DEFAULT 'draft' | |
+| `script` | TEXT | NOT NULL | System prompt / conversation script |
+| `voice_id` | VARCHAR(100) | NOT NULL | TTS voice identifier |
+| `language` | VARCHAR(10) | NOT NULL, DEFAULT 'sv' | |
+| `caller_id` | VARCHAR(20) | NOT NULL | Outbound caller ID (E.164) |
+| `disclosure_id` | UUID | FK → recording_disclosures.id, NOT NULL | |
+| `schedule_timezone` | VARCHAR(50) | NOT NULL, DEFAULT 'Europe/Stockholm' | |
+| `schedule_start_time` | VARCHAR(5) | NOT NULL | HH:MM e.g. "09:00" |
+| `schedule_end_time` | VARCHAR(5) | NOT NULL | HH:MM e.g. "17:00" |
+| `schedule_days` | JSON | NOT NULL | Array of weekdays [1,2,3,4,5] (1=Mon, 7=Sun) |
+| `max_concurrent_calls` | INTEGER | DEFAULT 10 | |
+| `max_attempts_per_lead` | INTEGER | DEFAULT 3 | |
+| `retry_interval_minutes` | INTEGER | DEFAULT 60 | |
+| `amd_action` | ENUM('hang_up', 'leave_message', 'retry_later') | DEFAULT 'hang_up' | |
+| `voicemail_script` | TEXT | NULLABLE | Required when amd_action = leave_message |
+| `created_by` | UUID | FK → users.id, NOT NULL | |
+| `started_at` | TIMESTAMP | NULLABLE | When campaign was first activated |
+| `completed_at` | TIMESTAMP | NULLABLE | When all leads processed |
+| `created_at` | TIMESTAMP | NOT NULL | |
+| `updated_at` | TIMESTAMP | NOT NULL | |
+| `deleted_at` | TIMESTAMP | NULLABLE | Soft delete |
+
+#### Table: `leads`
+
+| Column | Type | Constraints | Description |
+|---|---|---|---|
+| `id` | UUID | PK | |
+| `org_id` | UUID | FK → organizations.id, NOT NULL | |
+| `campaign_id` | UUID | FK → campaigns.id, NOT NULL | |
+| `name` | VARCHAR(255) | NOT NULL | |
+| `phone` | VARCHAR(20) | NOT NULL | E.164 format |
+| `email` | VARCHAR(255) | NULLABLE | |
+| `status` | ENUM('pending', 'in_progress', 'contacted', 'converted', 'dnc', 'failed', 'skipped') | DEFAULT 'pending' | |
+| `attempt_count` | INTEGER | DEFAULT 0 | |
+| `last_attempted_at` | TIMESTAMP | NULLABLE | |
+| `custom_fields` | JSON | NULLABLE | Extra columns from CSV upload |
+| `created_at` | TIMESTAMP | NOT NULL | |
+| `updated_at` | TIMESTAMP | NOT NULL | |
+
+#### Table: `lead_uploads`
+
+| Column | Type | Constraints | Description |
+|---|---|---|---|
+| `id` | UUID | PK | |
+| `org_id` | UUID | NOT NULL | |
+| `campaign_id` | UUID | FK → campaigns.id, NOT NULL | |
+| `status` | ENUM('processing', 'completed', 'failed') | DEFAULT 'processing' | |
+| `total_rows` | INTEGER | DEFAULT 0 | |
+| `valid_rows` | INTEGER | DEFAULT 0 | |
+| `invalid_rows` | INTEGER | DEFAULT 0 | |
+| `duplicate_rows` | INTEGER | DEFAULT 0 | |
+| `errors` | JSON | NULLABLE | `[{row, field, error}]` |
+| `created_at` | TIMESTAMP | NOT NULL | |
+| `updated_at` | TIMESTAMP | NOT NULL | |
+
+### 5.2 API Endpoints
+
+#### 5.2.1 CRUD
+
+**POST `/api/campaigns`** — Create a campaign. Role: `admin`, `manager`.
+
+**GET `/api/campaigns`** — List campaigns. Query params:
+```
+?status=active,paused
+&search=payment
+&sort=-created_at
+&include=leadStats
+&page=1
+&page_size=25
+```
+**Allowed filters:** `status` (comma-separated), `search` (partial name/description match).
+**Allowed sorts:** `name`, `status`, `created_at`, `updated_at`.
+**Allowed includes:** `leadStats` → appends `{ total, contacted, converted }` counts.
+
+**GET `/api/campaigns/{id}`** — Get campaign details. Role: `admin`, `manager`.
+
+**PUT `/api/campaigns/{id}`** — Update campaign. Only allowed when status is `draft` or `paused`. Role: `admin`, `manager`.
+
+**DELETE `/api/campaigns/{id}`** — Soft delete. Only allowed when status is `draft` or `completed`. Role: `admin`.
+
+#### 5.2.2 Campaign Actions
+
+**POST `/api/campaigns/{id}/activate`** — Activate campaign.
+Preconditions: must be `draft` or `paused`; must have ≥1 lead; disclosure must exist.
+
+**POST `/api/campaigns/{id}/pause`** — Pause active campaign. In-progress calls complete; no new calls.
+
+**POST `/api/campaigns/{id}/resume`** — Resume paused campaign. Status → `active`.
+
+#### 5.2.3 Lead Upload
+
+**POST `/api/campaigns/{id}/leads/upload`** — Upload leads via CSV.
+Content-Type: `multipart/form-data`. Role: `admin`, `manager`. Max file size: 10MB.
+
+Fields:
+- `file` — CSV file
+- `field_mapping` — JSON string: `{"name":"column_0","phone":"column_1","email":"column_2"}`
+- `skip_first_row` — `"true"` or `"false"`
+
+Phone normalization: Swedish `07XXXXXXXX` → `+467XXXXXXXX`; `00XX...` → `+XX...`; E.164 accepted as-is.
+
+Response (202 Accepted):
+```json
+{ "data": { "upload_id": "uuid", "status": "processing", "total_rows": 0, "message": "..." } }
+```
+
+**GET `/api/campaigns/{id}/leads/uploads/{upload_id}`** — Poll upload status.
+
+Response (completed):
+```json
+{
+  "data": {
+    "upload_id": "uuid",
+    "status": "completed",
+    "total_rows": 500,
+    "valid_rows": 487,
+    "invalid_rows": 13,
+    "duplicate_rows": 5,
+    "errors": [
+      { "row": 15, "field": "phone", "error": "Invalid phone number format: 'not-a-phone'" }
+    ]
+  }
+}
+```
+
+### 5.3 Campaign Dialer (Internal Service)
+
+The Campaign Dialer is a background worker that processes active campaigns. Not implemented as an HTTP route — will be triggered by a job scheduler (future).
+
+```typescript
+// Internal method in CampaignsService (stub — to be wired to a scheduler)
+async runDialerCycle(campaignId: string): Promise<void> {
+  // 1. Check campaign is active and within schedule window
+  // 2. Count active calls, calculate available slots
+  // 3. Get next dialable leads (status=pending, attempt_count < max_attempts)
+  // 4. For each lead: run compliance checks → if passed, call placeCall()
+}
+```
+
+### 5.4 Acceptance Criteria
+
+| ID | Criterion | How to Verify |
+|---|---|---|
+| AC-CAM-01 | Campaign can be created with all required fields | POST /campaigns with valid body → 201 |
+| AC-CAM-02 | CSV upload correctly imports valid leads and flags invalid rows | Upload CSV with mix of valid/invalid → verify counts match |
+| AC-CAM-03 | Campaign schedule prevents calls outside configured window | Enforced by compliance `callingWindowStart/End` from campaign schedule |
+| AC-CAM-04 | Pausing a campaign stops new calls but doesn't drop active calls | Status → paused; Campaign Dialer skips paused campaigns |
+| AC-CAM-05 | Resuming a paused campaign continues from where it left off | Status → active; remaining pending leads are dialed |
+| AC-CAM-06 | Campaign cannot be activated without leads | Attempt activate with 0 leads → 400 |
+| AC-CAM-07 | Campaign cannot be activated without a valid disclosure | Remove disclosure → attempt activate → 400 |
+
+---

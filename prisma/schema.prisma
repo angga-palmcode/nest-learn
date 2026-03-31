@@ -28,6 +28,8 @@ model Organization {
   complianceChecks     ComplianceCheck[]
   recordingDisclosures RecordingDisclosure[]
   calls                Call[]
+  campaigns            Campaign[]
+  leads                Lead[]
 }
 
 enum UserRole {
@@ -62,11 +64,12 @@ model User {
   failed_login_attempts Int       @default(0)
   locked_until          DateTime?
 
-  refreshTokens   RefreshToken[]
-  sessions        UserSession[]
-  sentInvitations UserInvitation[]
-  auditLogs       AuditLog[]
-  mfaEmailTokens  MfaEmailToken[]
+  refreshTokens    RefreshToken[]
+  sessions         UserSession[]
+  sentInvitations  UserInvitation[]
+  auditLogs        AuditLog[]
+  mfaEmailTokens   MfaEmailToken[]
+  createdCampaigns Campaign[]
 }
 
 model RefreshToken {
@@ -222,6 +225,8 @@ model RecordingDisclosure {
   is_default   Boolean      @default(false)
   created_at   DateTime     @default(now())
   updated_at   DateTime     @updatedAt
+
+  campaigns Campaign[]
 }
 
 // ─── Telephony ────────────────────────────────────────────────────────────────
@@ -307,4 +312,107 @@ model Call {
   @@index([org_id, status])
   @@index([org_id, campaign_id])
   @@index([org_id, lead_id])
+}
+
+// ─── Campaign Management ──────────────────────────────────────────────────────
+
+enum CampaignStatus {
+  draft
+  active
+  paused
+  completed
+  archived
+}
+
+enum CampaignAmdAction {
+  hang_up
+  leave_message
+  retry_later
+}
+
+enum LeadStatus {
+  pending
+  in_progress
+  contacted
+  converted
+  dnc
+  failed
+  skipped
+}
+
+enum UploadStatus {
+  processing
+  completed
+  failed
+}
+
+model Campaign {
+  id                     String            @id @default(uuid())
+  org_id                 String
+  org                    Organization      @relation(fields: [org_id], references: [id])
+  name                   String            @db.VarChar(255)
+  description            String?           @db.Text
+  status                 CampaignStatus    @default(draft)
+  script                 String            @db.Text
+  voice_id               String            @db.VarChar(100)
+  language               String            @default("sv") @db.VarChar(10)
+  caller_id              String            @db.VarChar(20)
+  disclosure_id          String
+  disclosure             RecordingDisclosure @relation(fields: [disclosure_id], references: [id])
+  schedule_timezone      String            @default("Europe/Stockholm") @db.VarChar(50)
+  schedule_start_time    String            @db.VarChar(5)
+  schedule_end_time      String            @db.VarChar(5)
+  schedule_days          Json
+  max_concurrent_calls   Int               @default(10)
+  max_attempts_per_lead  Int               @default(3)
+  retry_interval_minutes Int               @default(60)
+  amd_action             CampaignAmdAction @default(hang_up)
+  voicemail_script       String?           @db.Text
+  created_by             String
+  creator                User              @relation(fields: [created_by], references: [id])
+  started_at             DateTime?
+  completed_at           DateTime?
+  created_at             DateTime          @default(now())
+  updated_at             DateTime          @updatedAt
+  deleted_at             DateTime?
+
+  leads   Lead[]
+  uploads LeadUpload[]
+
+  @@index([org_id, status])
+}
+
+model Lead {
+  id                String     @id @default(uuid())
+  org_id            String
+  org               Organization @relation(fields: [org_id], references: [id])
+  campaign_id       String
+  campaign          Campaign   @relation(fields: [campaign_id], references: [id])
+  name              String     @db.VarChar(255)
+  phone             String     @db.VarChar(20)
+  email             String?    @db.VarChar(255)
+  status            LeadStatus @default(pending)
+  attempt_count     Int        @default(0)
+  last_attempted_at DateTime?
+  custom_fields     Json?
+  created_at        DateTime   @default(now())
+  updated_at        DateTime   @updatedAt
+
+  @@index([campaign_id, status])
+  @@index([campaign_id, phone])
+}
+
+model LeadUpload {
+  id             String       @id @default(uuid())
+  org_id         String
+  campaign_id    String
+  campaign       Campaign     @relation(fields: [campaign_id], references: [id])
+  status         UploadStatus @default(processing)
+  total_rows     Int          @default(0)
+  valid_rows     Int          @default(0)
+  invalid_rows   Int          @default(0)
+  duplicate_rows Int          @default(0)
+  errors         Json?
+  created_at     DateTime     @default(now())
+  updated_at     DateTime     @updatedAt
 }
