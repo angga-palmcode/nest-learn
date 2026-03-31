@@ -39,4 +39,25 @@ export class MailService {
   sendMfaEmailOtp(email: string, code: string): void {
     this.logger.log(`[MAIL] MFA email OTP → ${email} | Code: ${code}`);
   }
+
+  sendDemoRequestNotification(data: {
+    id: string;
+    company_name: string;
+    contact_name: string;
+    email: string;
+    phone?: string;
+    industry?: string;
+    message?: string;
+  }): void {
+    this.logger.log(`[MAIL] Demo request notification → sales team`);
+    this.logger.log(`[MAIL] From: ${data.contact_name} <${data.email}> @ ${data.company_name} | industry: ${data.industry ?? 'n/a'} | id: ${data.id}`);
+  }
+
+  sendDemoRequestConfirmation(data: {
+    contact_name: string;
+    email: string;
+    locale: string;
+  }): void {
+    this.logger.log(`[MAIL] Demo request confirmation → ${data.email} (locale: ${data.locale})`);
+  }
 }

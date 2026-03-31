@@ -444,3 +444,18 @@ model WebhookEndpoint {
 
   @@index([org_id, is_active])
 }
+
+// ─── Public / Landing Page ────────────────────────────────────────────────────
+
+model DemoRequest {
+  id           String   @id @default(uuid())
+  company_name String   @db.VarChar(255)
+  contact_name String   @db.VarChar(255)
+  email        String   @db.VarChar(255)
+  phone        String?  @db.VarChar(30)
+  industry     String?  @db.VarChar(100)
+  message      String?  @db.Text
+  locale       String   @default("sv") @db.VarChar(10)
+  ip_address   String?  @db.VarChar(45)
+  created_at   DateTime @default(now())
+}

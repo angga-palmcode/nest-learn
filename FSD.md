@@ -1853,3 +1853,187 @@ X-Astos-Timestamp: 2026-03-03T14:30:00Z
 | AC-INT-05 | Inactive endpoints receive no deliveries | Set `is_active=false` → dispatch fires → endpoint not called |
 
 ---
+
+## Module 9 — Landing Page
+
+**Frontend:** Next.js (not in this repo).
+
+**Backend (NestJS — implemented):**
+
+### 9.1 Demo Request API
+
+**`POST /public/demo-request`**
+- Authentication: none (public endpoint)
+- Rate limit: 5 requests per IP per hour
+
+**Request body:**
+```json
+{
+  "company_name": "Stockholm Insurance AB",
+  "contact_name": "Anna Svensson",
+  "email": "anna@insurance.se",
+  "phone": "+46701234567",
+  "industry": "insurance",
+  "message": "Interested in a pilot for outbound renewal calls.",
+  "locale": "sv"
+}
+```
+
+**Response:** `201 { "message": "Demo request received" }`
+
+**Side effects:**
+1. Stores record in `demo_requests` table (including requester IP)
+2. Logs internal sales notification email (console — no SMTP yet)
+3. Logs requester confirmation email (console — no SMTP yet)
+
+### 9.2 DemoRequest Model
+
+| Column | Type | Notes |
+|---|---|---|
+| id | UUID PK | auto |
+| company_name | VARCHAR(255) | required |
+| contact_name | VARCHAR(255) | required |
+| email | VARCHAR(255) | required |
+| phone | VARCHAR(30) NULLABLE | |
+| industry | VARCHAR(100) NULLABLE | |
+| message | TEXT NULLABLE | |
+| locale | VARCHAR(10) | default sv |
+| ip_address | VARCHAR(45) NULLABLE | captured from request |
+| created_at | TIMESTAMP | |
+
+### 9.3 Acceptance Criteria (backend)
+
+| ID | Criterion | How to Verify |
+|---|---|---|
+| AC-LP-03 | Demo request stores to DB and logs notifications | POST form → check DemoRequest table + console |
+| AC-LP-07 | Rate limit blocks > 5 requests/hr from same IP | Send 6 requests → 6th returns 429 |
+
+---
+
+## Module 10 — Security & Infrastructure
+
+**Infrastructure/DevOps:** GKE, Cloud SQL, Redis — outside this repo.
+
+**NestJS hardening (implemented):**
+
+### 10.1 Security Headers
+
+`helmet` middleware applied globally in `main.ts`. Adds:
+- `X-Content-Type-Options: nosniff`
+- `X-Frame-Options: DENY`
+- `Strict-Transport-Security` (HSTS)
+- `Referrer-Policy: no-referrer`
+- `Content-Security-Policy` (default helmet config)
+
+### 10.2 CORS
+
+```typescript
+app.enableCors({ origin: FRONTEND_URL, credentials: true })
+```
+Origin controlled via `FRONTEND_URL` env var.
+
+### 10.3 Rate Limiting
+
+Global default: 60 requests/minute per IP via `ThrottlerModule`.
+Per-endpoint overrides via `@Throttle()` decorator.
+429 responses use standard error format (`error_code: "RATE_LIMITED"`).
+
+### 10.4 Acceptance Criteria (NestJS)
+
+| ID | Criterion | How to Verify |
+|---|---|---|
+| AC-SEC-01 | Security headers present on all responses | Check response headers for X-Content-Type-Options, X-Frame-Options |
+| AC-SEC-03 | RBAC prevents unauthorized access | Test each role against PERMISSIONS matrix |
+| AC-SEC-06 | Rate limiting returns 429 after limit | Exceed 60 req/min → verify 429 with error_code: "RATE_LIMITED" |
+
+---
+
+## Appendix A — Standard Error Response Format
+
+All API errors follow this format (implemented via `HttpExceptionFilter`):
+
+```json
+{
+  "message": "Human-readable error message",
+  "errors": {
+    "field_name": ["Specific validation error message"]
+  },
+  "error_code": "MACHINE_READABLE_CODE",
+  "timestamp": "2026-03-03T14:30:00Z",
+  "trace_id": "uuid-for-debugging"
+}
+```
+
+Note: `errors` field is only present for validation failures.
+
+**Error code mapping:**
+
+| error_code | HTTP Status | Trigger |
+|---|---|---|
+| `VALIDATION_ERROR` | 400 / 422 | ValidationPipe failures |
+| `BAD_REQUEST` | 400 | Generic bad request |
+| `UNAUTHENTICATED` | 401 | Missing or invalid JWT |
+| `UNAUTHORIZED` | 403 | Insufficient role |
+| `NOT_FOUND` | 404 | Resource does not exist |
+| `CONFLICT` | 409 | Duplicate / state conflict |
+| `RATE_LIMITED` | 429 | Throttler limit exceeded |
+| `SERVER_ERROR` | 500+ | Unhandled exception |
+
+---
+
+## Appendix B: Environment Variables
+
+| Variable | Description | Example |
+|---|---|---|
+| `APP_ENV` | Environment | production, staging |
+| `APP_URL` | Laravel API base URL | https://api.astos.ai |
+| `FRONTEND_URL` | Next.js app URL | https://app.astos.ai |
+| `DB_CONNECTION` | Database driver | pgsql |
+| `DB_HOST` | Cloud SQL host | /cloudsql/project:region:instance |
+| `DB_DATABASE` | Database name | astos_production |
+| `REDIS_HOST` | Memorystore host | 10.0.0.5 |
+| `TELNYX_API_KEY` | Telnyx API key | (from Secret Manager) |
+| `TWILIO_ACCOUNT_SID` | Twilio SID | (from Secret Manager) |
+| `TWILIO_AUTH_TOKEN` | Twilio auth token | (from Secret Manager) |
+| `DEEPGRAM_API_KEY` | Deepgram API key | (from Secret Manager) |
+| `OPENAI_API_KEY` | OpenAI API key | (from Secret Manager) |
+| `CARTESIA_API_KEY` | Cartesia API key | (from Secret Manager) |
+| `GCS_BUCKET_RECORDINGS` | Cloud Storage bucket | astos-recordings-prod |
+| `GCS_BUCKET_UPLOADS` | Cloud Storage bucket | astos-uploads-prod |
+| `SANCTUM_TOKEN_EXPIRATION` | Token TTL in minutes | 1440 (24 hours) |
+| `MAIL_MAILER` | Email provider | smtp |
+
+---
+
+## Appendix C — Pagination & Query Parameter Standard
+
+**NestJS uses flat params** (not Laravel/Spatie bracket notation):
+
+```
+GET /resource?page=1&page_size=25&sort=-created_at&status=active&search=keyword
+```
+
+| Parameter | Format | Example |
+|---|---|---|
+| Page number | `page=N` | `page=1` |
+| Page size | `page_size=N` | `page_size=25` (max: 100, default: 25) |
+| Sort ascending | `sort=field` | `sort=name` |
+| Sort descending | `sort=-field` | `sort=-created_at` |
+| Filter (exact) | `field=value` | `status=active` |
+| Filter (multiple) | `field=v1,v2` | `status=active,paused` |
+| Filter (search) | `search=value` | `search=erik` |
+| Date range | `date_from=date` | `date_from=2026-03-01` |
+
+Pagination response meta:
+```json
+{
+  "meta": {
+    "current_page": 1,
+    "page_size": 25,
+    "total": 100,
+    "last_page": 4
+  }
+}
+```
+
+---

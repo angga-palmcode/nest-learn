@@ -12,6 +12,8 @@
 | 6 | Lead Management | ✅ Done | Expanded `Lead` model (renamed columns, new fields, full `LeadStatus` enum), list/get/update/export endpoints, DNC terminal-state protection |
 | 7 | Analytics Dashboard | ✅ Done | `GET /analytics/dashboard` (summary + hourly chart), `GET /analytics/campaigns/:id` (summary, funnel, intent distribution, calls over time with granularity) |
 | 8 | Integration & Webhooks | ✅ Done | `WebhookEndpoint` model, CRUD endpoints, HMAC-SHA256 signed delivery, 3-attempt retry with exponential backoff, `dispatch()` internal method, secret rotation |
+| 9 | Landing Page | ✅ Done (backend only) | `DemoRequest` model, `POST /public/demo-request` (no auth, 5/hr rate limit), console email notifications |
+| 10 | Security & Infrastructure | ✅ Done (NestJS hardening) | `helmet` security headers, CORS, `@nestjs/throttler` global 60 req/min + per-endpoint overrides, global `HttpExceptionFilter` (Appendix A format) |
 
 ---
 
@@ -158,6 +160,17 @@ src/
 │       ├── create-campaign.dto.ts
 │       ├── update-campaign.dto.ts
 │       └── list-campaigns.dto.ts
+│
+├── common/
+│   └── filters/
+│       └── http-exception.filter.ts  Global error format (Appendix A)
+│
+├── public/                     Public endpoints module (no auth)
+│   ├── public.module.ts
+│   ├── public.service.ts
+│   ├── public.controller.ts
+│   └── dto/
+│       └── demo-request.dto.ts
 │
 ├── webhooks/                   Integration & Webhooks module
 │   ├── webhooks.module.ts
@@ -416,6 +429,20 @@ prisma/
 | is_active | BOOLEAN | default true |
 | created_at / updated_at | TIMESTAMP | |
 
+### `DemoRequest`
+| Column | Type | Notes |
+|---|---|---|
+| id | UUID PK | auto |
+| company_name | VARCHAR(255) | required |
+| contact_name | VARCHAR(255) | required |
+| email | VARCHAR(255) | required |
+| phone | VARCHAR(30) NULLABLE | |
+| industry | VARCHAR(100) NULLABLE | debt_collection, insurance, banking, healthcare, other |
+| message | TEXT NULLABLE | |
+| locale | VARCHAR(10) | default sv |
+| ip_address | VARCHAR(45) NULLABLE | captured from request |
+| created_at | TIMESTAMP | |
+
 ### `Call`
 | Column | Type | Notes |
 |---|---|---|
@@ -581,6 +608,12 @@ prisma/
 | PUT | `/webhooks/:id` | admin | `{ url?, events[]?, is_active? }` | Update a webhook endpoint |
 | DELETE | `/webhooks/:id` | admin | — | Delete a webhook endpoint |
 | POST | `/webhooks/:id/rotate-secret` | admin | — | Rotate signing secret → returns new secret |
+
+### Public (`/public`) — no authentication
+
+| Method | Path | Role | Body | Description |
+|--------|------|------|------|-------------|
+| POST | `/public/demo-request` | none | `{ company_name, contact_name, email, phone?, industry?, message?, locale? }` | Submit demo request — rate limited 5/hr per IP |
 
 ---
 
@@ -775,3 +808,9 @@ req.user  // → { userId, orgId, role }
 - **Webhook delivery uses native `fetch`** — available in Node.js 22 without `node-fetch`. Uses `AbortSignal.timeout(10_000)` for a 10-second per-attempt timeout.
 - **`dispatch()` is fire-and-forget** — call sites (e.g. dialer engine) call `webhooksService.dispatch(orgId, payload)` without `await`. Errors are caught internally and logged.
 - **Webhook `events` validation** — `@Matches(/^(call|lead|campaign)\.\w+$/, { each: true })` allows any `domain.action` pattern matching those three namespaces. Extend the regex when new domains are added.
+- **Global `HttpExceptionFilter`** — catches all `HttpException` and unhandled `Error` instances, returns Appendix A format: `{ message, errors?, error_code, timestamp, trace_id }`. Registered in `main.ts` via `app.useGlobalFilters()`. ValidationPipe errors (array-shaped message) are automatically reshaped into `errors: { field: [msg] }` with `error_code: "VALIDATION_ERROR"`.
+- **Rate limiting via `@nestjs/throttler`** — `ThrottlerModule.forRoot([{ ttl: 60_000, limit: 60 }])` sets a 60 req/min default applied globally via `APP_GUARD`. `POST /public/demo-request` overrides to 5/hr with `@Throttle({ default: { ttl: 3_600_000, limit: 5 } })`. 429 responses are caught by the global filter → `error_code: "RATE_LIMITED"`.
+- **Helmet** — `app.use(helmet())` in `main.ts` adds `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Strict-Transport-Security`, `Referrer-Policy`, and CSP headers automatically.
+- **CORS** — `app.enableCors({ origin: FRONTEND_URL, credentials: true })`. Origin defaults to `http://localhost:5173` if env var is not set.
+- **`POST /public/demo-request` is fully public** — no `JwtAuthGuard`, no `RolesGuard`. IP captured with `@Ip()` decorator and stored in `DemoRequest.ip_address`.
+- **Pagination format** — NestJS convention uses flat params (`?page=1&page_size=25`), NOT the Laravel/Spatie bracket format (`page[number]=1`). All list endpoints use the flat format. Appendix C in the FSD describes the Laravel format which does not apply to this codebase.
