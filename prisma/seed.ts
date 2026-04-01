@@ -27,6 +27,7 @@ async function main() {
       password: hashedPassword,
       role: 'admin',
       org_id: org.id,
+      email_verified_at: new Date(),
     },
   });
   console.log('Admin user:', admin.email);

@@ -52,6 +52,7 @@ export class AuthController {
   @ApiResponse({ status: 401, description: 'Invalid credentials' })
   @ApiResponse({ status: 403, description: 'Account deactivated or email not verified' })
   @ApiResponse({ status: 429, description: 'Account locked after too many failed attempts' })
+  @ApiHeader({ name: 'user-agent', required: false, description: 'Sent automatically by all HTTP clients' })
   async login(
     @Body() body: LoginDto,
     @Request() req: any,
